@@ -209,9 +209,25 @@ for c in local-rag-n8n local-rag-ollama local-rag-qdrant local-rag-web; do
     c_status=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || true)
     c_dir=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$c" 2>/dev/null || true)
     
-    # If container is dead/exited OR from a different directory OR user requested --clean:
-    if [ "$DO_CLEAN" = true ] || [ "$c_status" = "exited" ] || [ "$c_status" = "dead" ] || [ -z "$c_dir" ] || [ "$c_dir" != "${ROOT_DIR}" ]; then
-      echo -e "${YELLOW}Releasing container '$c' (was in '$c_dir', status: $c_status)...${NC}"
+    # Check if host mounts for this container were deleted/recreated on host (stale inode)
+    mount_stale=false
+    if [ "$c_status" = "running" ]; then
+      case "$c" in
+        local-rag-ollama)
+          if ! docker exec "$c" ls -d /root/.ollama >/dev/null 2>&1; then mount_stale=true; fi
+          ;;
+        local-rag-qdrant)
+          if ! docker exec "$c" ls -d /qdrant/storage >/dev/null 2>&1; then mount_stale=true; fi
+          ;;
+        local-rag-n8n)
+          if ! docker exec "$c" ls -d /home/node/.n8n >/dev/null 2>&1; then mount_stale=true; fi
+          ;;
+      esac
+    fi
+
+    # If container is dead/exited OR mount is stale OR from a different directory OR user requested --clean:
+    if [ "$DO_CLEAN" = true ] || [ "$c_status" = "exited" ] || [ "$c_status" = "dead" ] || [ "$mount_stale" = true ] || [ -z "$c_dir" ] || [ "$c_dir" != "${ROOT_DIR}" ]; then
+      echo -e "${YELLOW}Releasing container '$c' (status: $c_status, mount_stale: $mount_stale)...${NC}"
       docker rm -f "$c" >/dev/null 2>&1 || true
     fi
   fi
@@ -323,14 +339,25 @@ echo -e "\n${BLUE}[6/9] Verifying AI models & Qdrant vector database...${NC}"
 
 # Qdrant collection
 COLLECTION_INFO=$(curl -s http://localhost:6333/collections/documents 2>/dev/null || true)
-if echo "$COLLECTION_INFO" | grep -q '"status":"green"'; then
-  echo -e "${GREEN}✓ Vector collection 'documents' is ready (768d Cosine).${NC}"
+if echo "$COLLECTION_INFO" | grep -q '"status":"green"' && echo "$COLLECTION_INFO" | grep -q '"sparse_vectors"'; then
+  echo -e "${GREEN}✓ Vector collection 'documents' is ready (768d Cosine + BM25 Sparse).${NC}"
 else
-  echo -e "${YELLOW}Creating collection 'documents' (768d Cosine for nomic-embed-text)...${NC}"
+  if echo "$COLLECTION_INFO" | grep -q '"status":"green"'; then
+    echo -e "${YELLOW}Migrating collection 'documents' to support Hybrid Sparse Vectors...${NC}"
+    curl -s -X DELETE http://localhost:6333/collections/documents >/dev/null 2>&1 || true
+  else
+    echo -e "${YELLOW}Creating collection 'documents' (768d Cosine + BM25 Sparse for Hybrid Search)...${NC}"
+  fi
   curl -s -X PUT http://localhost:6333/collections/documents \
     -H "Content-Type: application/json" \
-    -d '{"vectors": {"size": 768, "distance": "Cosine"}}' >/dev/null
-  echo -e "${GREEN}✓ Collection 'documents' created successfully.${NC}"
+    -d '{
+      "vectors": {"size": 768, "distance": "Cosine"},
+      "sparse_vectors": {"sparse": {}}
+    }' >/dev/null
+  curl -s -X PUT http://localhost:6333/collections/documents/index \
+    -H "Content-Type: application/json" \
+    -d '{"field_name": "metadata.source", "field_schema": "keyword"}' >/dev/null 2>&1 || true
+  echo -e "${GREEN}✓ Collection 'documents' created successfully (Hybrid Schema).${NC}"
 fi
 
 # Ollama models
@@ -354,7 +381,8 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "\n${BLUE}[7/9] Configuring n8n credentials, importing & publishing workflow...${NC}"
 
-docker exec -i local-rag-n8n sh -c 'cat << "EOF" > /tmp/credentials.json
+# Create credentials file inside n8n and import
+docker exec -u node local-rag-n8n sh -c 'cat << "EOF" > /tmp/credentials.json
 [
   {
     "id": "ollamaLocal001",
@@ -376,16 +404,16 @@ docker exec -i local-rag-n8n sh -c 'cat << "EOF" > /tmp/credentials.json
 EOF
 n8n import:credentials --input=/tmp/credentials.json >/dev/null 2>&1 || true
 rm -f /tmp/credentials.json
-'
+' || true
 
-# Import and publish workflow
-docker exec -i local-rag-n8n sh -c 'cat << "EOF" > /tmp/n8n-workflow.json
-'"$(cat "${ROOT_DIR}/n8n-workflow.json")"'
-EOF
+# Copy and import workflow safely
+docker cp "${ROOT_DIR}/n8n-workflow.json" local-rag-n8n:/tmp/n8n-workflow.json 2>/dev/null || true
+docker exec -u node local-rag-n8n sh -c '
 n8n import:workflow --input=/tmp/n8n-workflow.json >/dev/null 2>&1 || true
 n8n publish:workflow --id=localRAG002Agent >/dev/null 2>&1 || true
 rm -f /tmp/n8n-workflow.json
-'
+' || true
+
 
 # Restart n8n container to bind live webhooks
 echo -n "  - Restarting n8n to register production webhooks... "

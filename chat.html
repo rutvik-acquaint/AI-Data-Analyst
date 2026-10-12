@@ -761,6 +761,7 @@
     const activeDocText = document.getElementById('activeDocText');
     const clearActiveDocBtn = document.getElementById('clearActiveDocBtn');
 
+    // Updates the active document badge UI and saves the active file name to local storage
     function updateActiveDocBadge(docName) {
       currentActiveDoc = docName;
       if (docName) {
@@ -813,16 +814,19 @@
       selectedFileBar.style.display = 'none';
     });
 
+    // Fills the chat input box with text and focuses the cursor for quick typing
     function setQuery(text) {
       messageInput.value = text;
       messageInput.focus();
     }
 
+    // Fills the chat input box with a starter question and automatically submits it
     function submitStarterQuestion(text) {
       messageInput.value = text;
       chatForm.dispatchEvent(new Event('submit', { cancelable: true }));
     }
 
+    // Parses markdown text safely into HTML using marked.js, with fallback to plain line breaks
     function renderFormattedText(text) {
       if (!text) return '';
       if (window.marked && typeof window.marked.parse === 'function') {
@@ -835,6 +839,7 @@
       return text.replace(/\n/g, '<br>');
     }
 
+    // Creates and appends a new chat message bubble (user or assistant) to the conversation feed
     function appendMessage(sender, text, fileName) {
       const msg = document.createElement('div');
       msg.className = `message ${sender}`;
@@ -861,6 +866,7 @@
       return bubble;
     }
 
+    // Renders the dataset preview card showing table name, record count, column tags, and clickable starter questions
     function renderSchemaCard(schema) {
       if (!schema) return '';
       const cols = schema.columns || [];
@@ -903,6 +909,7 @@
       `;
     }
 
+    // Renders the expandable "How I got this" accordion showing the exact DuckDB SQL query and execution time
     function renderHowIGotThis(sql, timeMs, rowCount) {
       if (!sql) return '';
       const timeStr = timeMs !== undefined ? `${timeMs} ms` : '< 5 ms';
@@ -930,6 +937,7 @@
       `;
     }
 
+    // Renders document citation snippets with page numbers and hybrid match relevance badges
     function renderCitations(sources) {
       if (!sources || sources.length === 0) return '';
       const items = sources.map(s => {
@@ -959,6 +967,7 @@
       `;
     }
 
+    // Creates an interactive HTML5 Canvas chart (Bar, Donut, or Line) from SQL query results
     function renderCanvasChart(container, chartData) {
       if (!chartData || !chartData.labels || !chartData.values || chartData.labels.length === 0) return;
       const chartBox = document.createElement('div');
@@ -989,6 +998,7 @@
 
       let currentType = 'bar';
 
+      // Redraws the canvas chart based on the currently selected chart type (bar, donut, or line)
       function drawCurrentChart() {
         const ctx = canvas.getContext('2d');
         const dpr = window.devicePixelRatio || 1;
@@ -1188,6 +1198,7 @@
       setTimeout(drawCurrentChart, 50);
     }
 
+    // Copies the generated SQL query text to the user clipboard
     function copySqlCode(id) {
       const codeEl = document.getElementById(id);
       if (codeEl) {
@@ -1221,6 +1232,7 @@
           pendingBubble.innerHTML = `<em>Parsing <strong>${currentFile.name}</strong> and loading into DuckDB & Qdrant...</em>`;
           const formData = new FormData();
           formData.append('file', currentFile);
+          formData.append('session_id', sessionId);
 
           const res = await fetch(READER_INGEST_URL, {
             method: 'POST',

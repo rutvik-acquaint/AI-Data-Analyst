@@ -111,6 +111,7 @@ class UniversalFileReader:
 
     @staticmethod
     def _format_cell_value(val: Any) -> str:
+        """Converts any raw table cell value (numbers, dates, text) into a clean, readable string."""
         if val is None:
             return ""
         if isinstance(val, float) and val.is_integer():
@@ -581,6 +582,7 @@ class UniversalFileReader:
 
     @classmethod
     def _decode_bytes(cls, data: bytes) -> str:
+        """Tries multiple common text encodings (UTF-8, Latin-1, CP1252, etc.) to safely convert raw bytes into readable text without crashing."""
         for enc in ["utf-8", "utf-8-sig", "latin-1", "cp1252", "iso-8859-1", "utf-16"]:
             try:
                 return data.decode(enc)
@@ -649,6 +651,7 @@ class LocalRAGIndexer:
                  qdrant_url: str = "http://localhost:6333",
                  embedding_model: str = "nomic-embed-text",
                  collection_name: str = "documents"):
+        """Initializes the RAG indexer with Ollama embeddings, Qdrant vector database URL, and BM25 sparse search."""
         self.ollama_url = ollama_url
         self.qdrant_url = qdrant_url
         self.embedding_model = embedding_model
@@ -657,6 +660,7 @@ class LocalRAGIndexer:
         self._init_sparse_model()
 
     def _init_sparse_model(self):
+        """Loads the fast BM25 sparse text embedding model for exact keyword search."""
         if SparseTextEmbedding is not None:
             try:
                 self.sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
@@ -746,16 +750,29 @@ class LocalRAGIndexer:
         except Exception:
             return None
 
+    def collection_has_sparse_vectors(self) -> bool:
+        """Verifies if the Qdrant collection supports named 'sparse' vectors."""
+        try:
+            r = requests.get(f"{self.qdrant_url}/collections/{self.collection_name}", timeout=5)
+            if r.status_code == 200:
+                conf = r.json().get("result", {}).get("config", {}).get("params", {})
+                return "sparse_vectors" in conf and "sparse" in conf.get("sparse_vectors", {})
+        except Exception:
+            pass
+        return False
+
     def ensure_collection(self, dim: int = 768):
         """Ensures Qdrant collection exists with dense vector and named sparse vector schema."""
         try:
             r = requests.get(f"{self.qdrant_url}/collections/{self.collection_name}", timeout=5)
             if r.status_code == 200:
                 conf = r.json().get("result", {}).get("config", {}).get("params", {})
-                if "sparse_vectors" in conf:
+                if "sparse_vectors" in conf and "sparse" in conf.get("sparse_vectors", {}):
                     return
-        except Exception:
-            pass
+                logger.warning(f"Collection '{self.collection_name}' exists without sparse_vectors schema. Recreating...")
+                requests.delete(f"{self.qdrant_url}/collections/{self.collection_name}", timeout=10)
+        except Exception as e:
+            logger.warning(f"Could not check collection: {e}")
 
         requests.put(
             f"{self.qdrant_url}/collections/{self.collection_name}",
@@ -765,6 +782,14 @@ class LocalRAGIndexer:
             },
             timeout=10
         )
+        try:
+            requests.put(
+                f"{self.qdrant_url}/collections/{self.collection_name}/index",
+                json={"field_name": "metadata.source", "field_schema": "keyword"},
+                timeout=5
+            )
+        except Exception:
+            pass
 
     def delete_existing_file_vectors(self, filename: str):
         """Removes previous points for this filename so updates don't create stale duplicate chunks."""
@@ -796,22 +821,27 @@ class LocalRAGIndexer:
         self.ensure_collection(dim=768)
         self.delete_existing_file_vectors(filename)
 
+        has_sparse = self.collection_has_sparse_vectors()
         points = []
         for idx, chunk in enumerate(chunks):
             dense_vec = self.get_embedding(chunk)
-            sparse_vec = self.get_sparse_embedding(chunk)
+            sparse_vec = self.get_sparse_embedding(chunk) if has_sparse else None
             point_id = str(uuid.uuid4())
 
-            # Hybrid vector format: unnamed dense vector + named 'sparse' vector
-            vec_data = {"": dense_vec}
-            if sparse_vec and sparse_vec.get("indices"):
-                vec_data["sparse"] = sparse_vec
+            # Hybrid vector format if sparse is configured, otherwise fallback to standard dense vector
+            if has_sparse:
+                vec_data = {"": dense_vec}
+                if sparse_vec and sparse_vec.get("indices"):
+                    vec_data["sparse"] = sparse_vec
+            else:
+                vec_data = dense_vec
 
             points.append({
                 "id": point_id,
                 "vector": vec_data,
                 "payload": {
                     "content": chunk,
+                    "source": filename,
                     "metadata": {
                         "source": filename,
                         "file_type": doc_data.get("file_type", "txt"),
@@ -823,7 +853,7 @@ class LocalRAGIndexer:
             })
 
         res = requests.put(
-            f"{self.qdrant_url}/collections/{self.collection_name}/points",
+            f"{self.qdrant_url}/collections/{self.collection_name}/points?wait=true",
             json={"points": points},
             timeout=30
         )
@@ -834,7 +864,7 @@ class LocalRAGIndexer:
             "filename": filename,
             "chunks_indexed": len(points),
             "total_chars": len(text),
-            "is_hybrid": bool(self.sparse_model)
+            "is_hybrid": bool(has_sparse and self.sparse_model)
         }
 
     def hybrid_search(self, query: str, top_k: int = 15, source_filter: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -856,8 +886,9 @@ class LocalRAGIndexer:
                 ]
             }
 
+        has_sparse = self.collection_has_sparse_vectors()
         # 1. Native Hybrid Search with RRF Fusion
-        if sparse_vec and sparse_vec.get("indices"):
+        if has_sparse and sparse_vec and sparse_vec.get("indices"):
             try:
                 prefetch_dense = {
                     "query": dense_vec,
@@ -937,11 +968,13 @@ class LocalReranker:
     Computes exact query-document semantic relevance in ~5-15ms on CPU.
     """
     def __init__(self, model_name: str = "ms-marco-MiniLM-L-12-v2"):
+        """Initializes the local cross-encoder reranker model (FlashRank) using lightweight ONNX runtime on CPU."""
         self.model_name = model_name
         self.ranker = None
         self._init_model()
 
     def _init_model(self):
+        """Loads the FlashRank neural reranker model into memory."""
         if Ranker is not None:
             try:
                 self.ranker = Ranker(model_name=self.model_name)
@@ -952,6 +985,7 @@ class LocalReranker:
                     self.ranker = None
 
     def rerank(self, query: str, candidates: List[Dict[str, Any]], top_k: int = 4) -> List[Dict[str, Any]]:
+        """Re-scores and re-orders candidate document passages to place the most accurate, relevant results at the top."""
         if not self.ranker or not candidates:
             return candidates[:top_k]
         try:
@@ -983,6 +1017,7 @@ class RAGResponseValidator:
     """
 
     def __init__(self, indexer_inst: Optional[LocalRAGIndexer] = None):
+        """Initializes the response validator with optional access to the indexer."""
         self.indexer = indexer_inst
 
     def humanize_tone(self, text: str) -> str:
@@ -1050,6 +1085,7 @@ class DuckDBEngine:
     for spreadsheets (.xls, .xlsx), CSVs, and tabular datasets.
     """
     def __init__(self, db_path: Optional[str] = None):
+        """Initializes the in-memory or file-backed DuckDB database connection and creates table registries."""
         if db_path is None:
             base_dir = Path(__file__).resolve().parent
             data_dir = base_dir / "duckdb_data"
@@ -1275,10 +1311,12 @@ class DuckDBEngine:
 class QueryRouter:
     """Classifies user queries to route them to Conversational AI, deterministic DuckDB SQL, or Hybrid RAG."""
     def __init__(self, duckdb_engine: DuckDBEngine):
+        """Initializes the query classifier with access to the DuckDB engine to check table columns."""
         self.duckdb_engine = duckdb_engine
 
     @staticmethod
     def is_pure_math(query: str) -> bool:
+        """Detects if the user query is a direct mathematical calculation (e.g., 25 * 14 or what is 100 / 4)."""
         q = query.strip().rstrip("?").strip()
         math_cleaned = re.sub(r"^(?:what\s+is|calculate|compute|solve|how\s+much\s+is)\s+", "", q, flags=re.IGNORECASE).strip()
         if re.match(r"^[\d\s\+\-\*\/\^\(\)\.\%]+$", math_cleaned) and any(op in math_cleaned for op in ["+", "-", "*", "/", "%", "^"]):
@@ -1287,6 +1325,7 @@ class QueryRouter:
 
     @staticmethod
     def safe_math_eval(query: str) -> Optional[Union[int, float]]:
+        """Safely calculates the mathematical expression using Python AST without using unsafe eval()."""
         clean = re.sub(r"^(?:what\s+is|calculate|compute|solve|how\s+much\s+is)\s+", "", query.strip().rstrip("?").strip(), flags=re.IGNORECASE)
         math_ops = {
             ast.Add: operator.add,
@@ -1320,6 +1359,7 @@ class QueryRouter:
 
     @staticmethod
     def is_conversational(query: str) -> bool:
+        """Checks if the query is a greeting, general conversational remark, or safety inquiry rather than a document question."""
         q_clean = query.strip().lower()
         if not q_clean:
             return True
@@ -1355,6 +1395,7 @@ class QueryRouter:
         return False
 
     def classify(self, query: str, target_doc: Optional[str] = None) -> str:
+        """Intelligently classifies user query into CONVERSATIONAL, pure SQL, semantic RAG, or HYBRID mode."""
         q_lower = query.lower()
 
         # Step 0: Conversational / Math / Greetings
@@ -1433,10 +1474,12 @@ class QueryRouter:
 class TextToSQLEngine:
     """Translates natural language questions to DuckDB ANSI SQL with automated error recovery."""
     def __init__(self, duckdb_engine: DuckDBEngine, ollama_url: str = "http://localhost:11434"):
+        """Initializes the natural language to SQL translator with DuckDB connection and Ollama LLM endpoint."""
         self.duckdb_engine = duckdb_engine
         self.ollama_url = ollama_url
 
     def get_schema_context(self) -> str:
+        """Builds a clean database schema prompt describing table names, columns, types, and sample values."""
         if not self.duckdb_engine.registry:
             return "No tables currently loaded."
 
@@ -1451,6 +1494,7 @@ class TextToSQLEngine:
         return "\n".join(lines)
 
     def generate_sql(self, query: str, previous_error: Optional[str] = None, failed_sql: Optional[str] = None) -> Optional[str]:
+        """Asks the local Ollama LLM to write a read-only DuckDB SQL query, with auto-retry and self-correction if an error occurs."""
         schema_ctx = self.get_schema_context()
         system_prompt = (
             "You are an expert SQL Data Analyst for DuckDB.\n"
@@ -1497,6 +1541,7 @@ class TextToSQLEngine:
             return None
 
     def process_query(self, query: str) -> Dict[str, Any]:
+        """Handles the complete pipeline: generates SQL from natural language, executes it on DuckDB, and formats the result."""
         sql = self.generate_sql(query)
         if not sql:
             return {
@@ -1598,6 +1643,7 @@ class TextToSQLEngine:
 class ChatHistoryDB:
     """Manages persistent chat sessions and multi-turn message history in SQLite."""
     def __init__(self, db_path: Optional[str] = None):
+        """Initializes the SQLite conversation database and creates necessary tables for sessions and messages."""
         if db_path is None:
             base_dir = Path(__file__).resolve().parent
             data_dir = base_dir / "chat_data"
@@ -1607,9 +1653,11 @@ class ChatHistoryDB:
         self._init_db()
 
     def _get_con(self):
+        """Creates and returns a connection to the SQLite chat history database."""
         return sqlite3.connect(self.db_path)
 
     def _init_db(self):
+        """Creates sessions and messages tables in SQLite if they do not exist already."""
         with self._get_con() as con:
             con.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -1638,6 +1686,7 @@ class ChatHistoryDB:
             con.commit()
 
     def get_or_create_session(self, session_id: Optional[str] = None, title: str = "New Conversation") -> str:
+        """Finds an existing chat session by ID or creates a new one with a default title."""
         s_id = session_id or str(uuid.uuid4())
         with self._get_con() as con:
             cur = con.cursor()
@@ -1649,11 +1698,13 @@ class ChatHistoryDB:
         return s_id
 
     def set_session_active_doc(self, session_id: str, doc_name: str):
+        """Saves the active document name for this chat session so follow-up questions stay in context."""
         with self._get_con() as con:
             con.execute("UPDATE sessions SET active_document = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (doc_name, session_id))
             con.commit()
 
     def get_session_active_doc(self, session_id: str) -> Optional[str]:
+        """Retrieves the currently active document bound to this chat session."""
         with self._get_con() as con:
             cur = con.cursor()
             cur.execute("SELECT active_document FROM sessions WHERE id = ?", (session_id,))
@@ -1661,6 +1712,7 @@ class ChatHistoryDB:
             return row[0] if row and row[0] else None
 
     def add_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None):
+        """Saves a new user or assistant message with timestamp and metadata into the chat history."""
         msg_id = str(uuid.uuid4())
         meta_str = json.dumps(metadata or {})
         with self._get_con() as con:
@@ -1678,6 +1730,7 @@ class ChatHistoryDB:
             con.commit()
 
     def get_messages(self, session_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+        """Loads the recent conversation messages for a chat session in chronological order."""
         with self._get_con() as con:
             cur = con.cursor()
             cur.execute(
@@ -1703,6 +1756,7 @@ class ChatHistoryDB:
             return messages
 
     def list_sessions(self) -> List[Dict[str, Any]]:
+        """Lists all saved chat sessions ordered by most recently updated."""
         with self._get_con() as con:
             cur = con.cursor()
             cur.execute("SELECT id, title, active_document, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 50")
@@ -1710,6 +1764,7 @@ class ChatHistoryDB:
             return [{"id": r[0], "title": r[1], "active_document": r[2], "created_at": r[3], "updated_at": r[4]} for r in rows]
 
     def clear_session(self, session_id: str):
+        """Deletes all messages and session records for a given session ID."""
         with self._get_con() as con:
             con.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             con.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -1727,10 +1782,12 @@ class DocumentCatalogManager:
     - Prevents cross-document noise, false-positives, and hallucinations.
     """
     def __init__(self, indexer: "LocalRAGIndexer", duckdb_engine: Optional["DuckDBEngine"] = None):
+        """Initializes the catalog manager with vector search indexer and DuckDB engine."""
         self.indexer = indexer
         self.duckdb_engine = duckdb_engine
 
     def get_catalog(self) -> List[Dict[str, Any]]:
+        """Discovers all uploaded documents across Qdrant and DuckDB, creating searchable names, types, and aliases."""
         raw_sources = self.indexer.list_indexed_sources()
         sources = [s for s in raw_sources if s and not re.match(r"^(?:blob|test)$", s)]
         if self.duckdb_engine and hasattr(self.duckdb_engine, "registry"):
@@ -1777,6 +1834,7 @@ class DocumentCatalogManager:
 
     def resolve_target_document(self, query: str, session_active_doc: Optional[str] = None) -> Optional[str]:
         # Conversational / Math queries should NEVER be bound to documents!
+        """Finds which document the user is asking about by checking filenames, aliases, keywords, or active session context."""
         if QueryRouter.is_conversational(query):
             return None
 
@@ -1808,9 +1866,19 @@ class DocumentCatalogManager:
                 if re.search(pattern, q_norm):
                     return item["source"]
 
-        # Step 3: Type keyword match if unique in catalog
+        # Step 3: Type & File Extension keyword match if unique in catalog
         type_matches = set()
         for item in catalog:
+            ext = (item.get("extension") or "").lower()
+            if ext in ["md", "markdown"] and re.search(r"(\.md\b|\bmd\b|\bmarkdown\b)", q_norm):
+                type_matches.add(item["source"])
+            elif ext == "pdf" and re.search(r"(\.pdf\b|\bpdf\b)", q_norm):
+                type_matches.add(item["source"])
+            elif ext in ["xls", "xlsx", "csv"] and re.search(r"(\.(?:xls|xlsx|csv)\b|\b(?:excel|spreadsheet|sheet)\b)", q_norm):
+                type_matches.add(item["source"])
+            elif ext in ["doc", "docx"] and re.search(r"(\.(?:docx?)\b|\b(?:doc|word)\b)", q_norm):
+                type_matches.add(item["source"])
+
             for kw in item["keywords"]:
                 if kw in ["resume", "cv", "policy", "policies", "spreadsheet", "excel"]:
                     if re.search(r"\b" + re.escape(kw) + r"\b", q_norm):
@@ -1825,6 +1893,17 @@ class DocumentCatalogManager:
         if session_active_doc:
             return session_active_doc
 
+        # Step 5: Single Document in Catalog fallback
+        # If the user has exactly one uploaded document and asks questions referring to it or requesting an overview
+        if len(catalog) == 1:
+            doc_cues = [
+                r"\b(file|document|doc|pdf|table|sheet|data|page|clause|section|policy|resume|cv)\b",
+                r"\b(what\s+(?:is|are|does|was|in|inside)|explain|summarize|tell\s+me|overview|details)\b",
+                r"\b(content|contents|it|this|that|key\s*points|main\s*points|highlights)\b"
+            ]
+            if any(re.search(c, q_norm) for c in doc_cues) or is_summary_query(query):
+                return catalog[0]["source"]
+
         return None
 
 
@@ -1834,9 +1913,11 @@ class DocumentCatalogManager:
 class ConversationalQueryRewriter:
     """Rewrites follow-up questions containing pronouns/ellipsis into standalone search queries."""
     def __init__(self, ollama_url: str = "http://localhost:11434"):
+        """Initializes the conversational query rewriter with the local Ollama LLM endpoint."""
         self.ollama_url = ollama_url
 
     def rewrite_if_needed(self, query: str, history: List[Dict[str, Any]], target_doc: Optional[str] = None) -> str:
+        """Rewrites ambiguous follow-up questions (with pronouns like it, this, they) into standalone search queries."""
         q_lower = query.lower().strip()
 
         # If target_doc is active in the session, anchor search query to target_doc directly
@@ -2178,6 +2259,7 @@ catalog_manager = DocumentCatalogManager(indexer, duckdb_engine)
 
 @app.get("/health")
 def health():
+    """API health check endpoint: reports engine status, loaded tables, and active AI models."""
     return {
         "status": "ok",
         "engine": "UniversalFileReader & LocalDataAnalyst",
@@ -2799,16 +2881,19 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
 
 @app.get("/chat/sessions")
 def list_chat_sessions():
+    """API endpoint: returns a list of all saved chat sessions."""
     return {"sessions": chat_history.list_sessions()}
 
 
 @app.get("/chat/sessions/{session_id}/messages")
 def get_session_messages(session_id: str):
+    """API endpoint: returns all messages for a specific chat session."""
     return {"session_id": session_id, "messages": chat_history.get_messages(session_id)}
 
 
 @app.post("/chat/sessions/{session_id}/clear")
 def clear_chat_session(session_id: str):
+    """API endpoint: clears and deletes a chat session and its message history."""
     chat_history.clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
 

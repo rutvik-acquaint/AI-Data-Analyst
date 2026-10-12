@@ -5,7 +5,7 @@
 
 ---
 
-## 🌟 What is This Project? (In Plain English)
+## 🌟 What is This Project?
 
 Imagine having your own **private ChatGPT and data analyst** running right on your laptop or PC:
 

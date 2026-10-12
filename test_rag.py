@@ -19,6 +19,7 @@ OLLAMA_URL = "http://localhost:11434"
 WEBHOOK_URL = f"{N8N_URL}/webhook/local-rag-chat/chat"
 
 def check_services():
+    """Checks that Docker services (Qdrant on 6333, Ollama on 11434, n8n on 5678) are running and responsive."""
     print("🔍 [1/4] Checking Services Health...")
     
     # Qdrant
@@ -54,6 +55,7 @@ def check_services():
         print(f"  ✗ n8n unreachable: {e}")
 
 def test_flow_a_ingestion(filepath="sample_company_policies.txt"):
+    """Uploads and indexes a sample document into Qdrant vector database via webhook."""
     print("\n📄 [2/4] Testing Flow A (Document Ingestion)...")
     try:
         with open(filepath, "rb") as f:
@@ -67,6 +69,7 @@ def test_flow_a_ingestion(filepath="sample_company_policies.txt"):
         print(f"  ✗ Ingestion failed: {e}")
 
 def check_qdrant_vectors():
+    """Verifies that documents were successfully chunked and stored as vectors in Qdrant."""
     print("\n📊 [3/4] Checking Qdrant Collection Stats...")
     try:
         r = requests.get(f"{QDRANT_URL}/collections/documents", timeout=5)
@@ -80,6 +83,7 @@ def check_qdrant_vectors():
         print(f"  ✗ Error querying Qdrant: {e}")
 
 def test_flow_b_qa(query="Who is leading Project Apollo and what is its objective?"):
+    """Asks a document question through the AI webhook and verifies the answer and citations."""
     print(f"\n💬 [4/4] Testing Flow B (Question Answering)...")
     print(f"  Query: \"{query}\"")
     try:
@@ -93,6 +97,7 @@ def test_flow_b_qa(query="Who is leading Project Apollo and what is its objectiv
         print(f"  ✗ Q&A query failed: {e}")
 
 def test_duckdb_sql():
+    """Tests DuckDB analytical SQL execution on tabular data for exact calculations."""
     print("\n⚡ [DuckDB Engine] Testing Sub-millisecond SQL Execution on Spreadsheets...")
     try:
         url = "http://localhost:8001/sql"
@@ -112,6 +117,7 @@ def test_duckdb_sql():
         print(f"  ✗ DuckDB SQL test failed: {e}")
 
 def test_intelligent_router():
+    """Verifies that user queries are correctly classified into pure SQL, semantic RAG, or conversational."""
     print("\n🧠 [Router & Analyst] Testing Intent Classification & Text-to-SQL...")
     queries = [
         ("how many records date is > 2016", "SQL"),
@@ -138,6 +144,7 @@ def test_intelligent_router():
             print(f"  ✗ Router test failed for '{q}': {e}")
 
 def test_hybrid_and_reranker():
+    """Tests hybrid search (dense vectors + sparse BM25 keywords) and FlashRank cross-encoder reranking."""
     print("\n🔬 [Phase 2: Hybrid Search & Cross-Encoder] Testing Dense+BM25 & FlashRank...")
     # 1. Health check
     try:
@@ -175,6 +182,7 @@ def test_hybrid_and_reranker():
         print(f"  ✗ Weak retrieval guardrail test failed: {e}")
 
 def test_phase3_features():
+    """Tests multi-turn chat history persistence, session active document scoping, and response validation."""
     print("\n🚀 [Phase 3: Conversational AI, Math & Document Tasks] Testing Phase 3 capabilities...")
     # 1. Pure Math Evaluation Test
     try:

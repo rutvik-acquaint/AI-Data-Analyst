@@ -43,7 +43,7 @@ sudo dnf install git -y
 Open Terminal and run:
 
 ```bash
-git clone https://github.com/acqreactdev1/AI-Data-Analyst.git
+git clone https://github.com/rutvik-acquaint/AI-Data-Analyst.git
 ```
 
 This will download the entire project into a folder called `AI-Data-Analyst`.
@@ -74,8 +74,9 @@ The script will automatically:
 👉 **[http://localhost:8080](http://localhost:8080)**
 
 > **💡 TIP — Copy-paste the full Quick Start in one go:**
+>
 > ```bash
-> git clone https://github.com/acqreactdev1/AI-Data-Analyst.git
+> git clone https://github.com/rutvik-acquaint/AI-Data-Analyst.git
 > cd AI-Data-Analyst
 > bash start.sh
 > ```
@@ -200,13 +201,13 @@ You can also ask general questions without uploading any files:
 
 ## 🖥️ System Requirements
 
-| Component               | Minimum                                                      | Recommended                           |
-| :---------------------- | :----------------------------------------------------------- | :------------------------------------ |
-| **Operating System**    | Linux (Ubuntu, Debian, Fedora, Mint) or Windows/Mac via WSL2 | Linux (Ubuntu 22.04+ or 24.04+)       |
-| **Memory (RAM)**        | 4 GB                                                         | 8 GB or more                          |
-| **Processor (CPU)**     | 4 cores                                                      | 4–8 cores                             |
-| **Disk Space**          | 4 GB free space                                              | 10 GB free space (for models & cache) |
-| **Internet Connection** | Required only during first-time setup (clone + model download ~2.3 GB) | Completely offline once set up |
+| Component               | Minimum                                                                | Recommended                           |
+| :---------------------- | :--------------------------------------------------------------------- | :------------------------------------ |
+| **Operating System**    | Linux (Ubuntu, Debian, Fedora, Mint) or Windows/Mac via WSL2           | Linux (Ubuntu 22.04+ or 24.04+)       |
+| **Memory (RAM)**        | 4 GB                                                                   | 8 GB or more                          |
+| **Processor (CPU)**     | 4 cores                                                                | 4–8 cores                             |
+| **Disk Space**          | 4 GB free space                                                        | 10 GB free space (for models & cache) |
+| **Internet Connection** | Required only during first-time setup (clone + model download ~2.3 GB) | Completely offline once set up        |
 
 ---
 
@@ -288,19 +289,19 @@ AI-Data-Analyst/
 
 Every technology was hand-picked to keep the system **100% local, private, fast, and free**. Here is a plain-English breakdown:
 
-| Technology | What It Does in This Project | Why We Chose It |
-| :--- | :--- | :--- |
-| **Python 3** | The main programming language that glues everything together. | Industry standard for AI/ML. Huge ecosystem of libraries, easy to read and maintain. |
-| **FastAPI** | Runs the core engine server (port `8001`) that receives your questions and files. | Blazing fast (async), built-in auto-documentation, and handles real-time streaming responses effortlessly. |
-| **Ollama** | Runs the AI brain (`llama3.2` for answers, `nomic-embed-text` for understanding documents) directly on your CPU. | No cloud API keys needed. Models run 100% offline on your own hardware — your data never leaves your machine. |
-| **DuckDB** | The analytics database engine. When you upload a spreadsheet, your data is loaded here and queried with real SQL. | In-process (no separate server), sub-millisecond query speed, and produces **exact mathematical answers** — no AI hallucination on numbers. |
-| **Qdrant** | The vector search database. Stores "smart fingerprints" of your document paragraphs so the AI can find the most relevant passages. | Best-in-class hybrid search (dense vectors + sparse BM25 keywords), runs locally via Docker, and has a built-in visual dashboard. |
-| **FlashRank** | A lightweight local reranker. After Qdrant finds candidate passages, FlashRank re-scores them for higher accuracy. | Runs entirely on CPU (no GPU needed), adds almost zero latency, and dramatically improves answer relevance. |
-| **n8n** | A visual workflow orchestration tool (port `5678`). It connects the chat UI to the engine and manages the agent pipeline. | Drag-and-drop workflow builder, self-hosted, and makes it easy to add new automation steps without writing code. |
-| **Docker & Docker Compose** | Packages Qdrant, Ollama, n8n, and the web server into isolated containers that start with one command. | Guarantees "works on every machine" — no dependency conflicts, no manual installs, and clean teardown with `stop.sh`. |
-| **Nginx** | A tiny web server inside Docker that serves the chat page (`chat.html`) on port `8080`. | Ultra-lightweight, battle-tested, and ensures the UI is served properly with correct headers and caching. |
-| **SQLite** | Stores your chat history and session context locally in a small file (`chat_history.db`). | Zero-config, single-file database — perfect for conversation memory without needing a heavy database server. |
-| **HTML / CSS / JavaScript** | The chat interface (`chat.html`) that you interact with in your browser. | No build tools, no frameworks, no npm installs — just open the file and it works in any modern browser. |
+| Technology                  | What It Does in This Project                                                                                                       | Why We Chose It                                                                                                                             |
+| :-------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Python 3**                | The main programming language that glues everything together.                                                                      | Industry standard for AI/ML. Huge ecosystem of libraries, easy to read and maintain.                                                        |
+| **FastAPI**                 | Runs the core engine server (port `8001`) that receives your questions and files.                                                  | Blazing fast (async), built-in auto-documentation, and handles real-time streaming responses effortlessly.                                  |
+| **Ollama**                  | Runs the AI brain (`llama3.2` for answers, `nomic-embed-text` for understanding documents) directly on your CPU.                   | No cloud API keys needed. Models run 100% offline on your own hardware — your data never leaves your machine.                               |
+| **DuckDB**                  | The analytics database engine. When you upload a spreadsheet, your data is loaded here and queried with real SQL.                  | In-process (no separate server), sub-millisecond query speed, and produces **exact mathematical answers** — no AI hallucination on numbers. |
+| **Qdrant**                  | The vector search database. Stores "smart fingerprints" of your document paragraphs so the AI can find the most relevant passages. | Best-in-class hybrid search (dense vectors + sparse BM25 keywords), runs locally via Docker, and has a built-in visual dashboard.           |
+| **FlashRank**               | A lightweight local reranker. After Qdrant finds candidate passages, FlashRank re-scores them for higher accuracy.                 | Runs entirely on CPU (no GPU needed), adds almost zero latency, and dramatically improves answer relevance.                                 |
+| **n8n**                     | A visual workflow orchestration tool (port `5678`). It connects the chat UI to the engine and manages the agent pipeline.          | Drag-and-drop workflow builder, self-hosted, and makes it easy to add new automation steps without writing code.                            |
+| **Docker & Docker Compose** | Packages Qdrant, Ollama, n8n, and the web server into isolated containers that start with one command.                             | Guarantees "works on every machine" — no dependency conflicts, no manual installs, and clean teardown with `stop.sh`.                       |
+| **Nginx**                   | A tiny web server inside Docker that serves the chat page (`chat.html`) on port `8080`.                                            | Ultra-lightweight, battle-tested, and ensures the UI is served properly with correct headers and caching.                                   |
+| **SQLite**                  | Stores your chat history and session context locally in a small file (`chat_history.db`).                                          | Zero-config, single-file database — perfect for conversation memory without needing a heavy database server.                                |
+| **HTML / CSS / JavaScript** | The chat interface (`chat.html`) that you interact with in your browser.                                                           | No build tools, no frameworks, no npm installs — just open the file and it works in any modern browser.                                     |
 
 ### 🤔 Why This Combination?
 

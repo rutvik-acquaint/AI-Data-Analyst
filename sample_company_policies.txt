@@ -1,0 +1,16 @@
+# Acme Global Corporation - Internal Guidelines 2026
+
+## 1. Project Apollo Overview
+Project Apollo is an autonomous robotics initiative launched on March 15, 2026.
+The lead engineer for Apollo is Dr. Sarah Vance, based in the Zurich Research Lab.
+The primary objective of Project Apollo is to reduce warehouse sorting latency by 45% using lightweight edge neural networks.
+
+## 2. Remote Work & Travel Policy
+- Team members are permitted to work remotely up to 3 days per week.
+- All international travel requires Level 4 VP approval and must be booked through the Portal at least 14 days in advance.
+- The maximum daily meal allowance for business travel is $75 USD ($95 EUR in Europe).
+
+## 3. Security & Data Protection
+- Two-Factor Authentication (FIDO2 hardware key) is mandatory for all developer machines.
+- Passwords must be at least 18 characters long and rotated every 90 days.
+- Production database access requires an approved JIRA security ticket and ephemeral bastion credentials expiring in 2 hours.

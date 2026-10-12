@@ -1,0 +1,356 @@
+{
+  "id": "localRAG002Agent",
+  "name": "Local RAG Agent (n8n + Ollama + Qdrant)",
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "mode": "webhook",
+        "options": {
+          "allowFileUploads": true,
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "chat-trigger",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [100, 200],
+      "webhookId": "local-rag-chat"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "check-has-file",
+              "leftValue": "={{ Object.keys($binary || {}).length > 0 || ($json.files && $json.files.length > 0) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-file-check",
+      "name": "Has File Attached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [340, 200]
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "qdrantCollection": {
+          "__rl": true,
+          "value": "documents",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "qdrant-insert",
+      "name": "Qdrant Vector Store (Insert)",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1,
+      "position": [620, 40],
+      "credentials": {
+        "qdrantApi": {
+          "id": "qdrantCreds001",
+          "name": "Qdrant account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "nomic-embed-text:latest"
+      },
+      "id": "embeddings-ollama-insert",
+      "name": "Embeddings Ollama (Insert)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOllama",
+      "typeVersion": 1,
+      "position": [520, 240],
+      "credentials": {
+        "ollamaApi": {
+          "id": "ollamaLocal001",
+          "name": "Ollama Local Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "dataType": "binary",
+        "options": {}
+      },
+      "id": "data-loader",
+      "name": "Default Data Loader",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [740, 240]
+    },
+    {
+      "parameters": {
+        "chunkSize": 800,
+        "chunkOverlap": 100,
+        "options": {}
+      },
+      "id": "text-splitter",
+      "name": "Recursive Character Text Splitter",
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [880, 400]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "msg-output",
+              "name": "output",
+              "value": "File indexed, ask me anything.",
+              "type": "string"
+            },
+            {
+              "id": "msg-text",
+              "name": "text",
+              "value": "File indexed, ask me anything.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reply-file-indexed",
+      "name": "Reply File Indexed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [960, 40]
+    },
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "You are a warm, helpful, and articulate AI personal assistant and data specialist.\n\nHUMANIZED CONVERSATIONAL GUIDELINES:\n1. Natural & Empathetic Tone:\n- Speak naturally, warmly, and helpfully like an experienced human colleague.\n- Never give cold, robotic, or dry negative answers (e.g. avoid 'No, this data is not user data. The data appears to be a sample dataset with 9 records and 8 attributes.').\n- Instead, explain context with conversational clarity. For example: 'No, this doesn't look like live user or customer data. It appears to be a standard sample dataset containing fictional profile records (such as Dulce Abril, Mara Hashimoto, etc.) commonly used for testing spreadsheets.'\n- When asked to list data or tables, add a polite, friendly introductory sentence (e.g., 'Here is the complete list of all 9 records from the spreadsheet neatly organized for you:').\n\n2. Accurate Document & Tabular Retrieval:\n- Call `qdrant_retriever` whenever the user asks questions about documents, files, spreadsheets, or data.\n- For questions asking to filter, count, or compare data (such as dates > 2016, age < 30, or specific countries):\n  * Check the year and date of each row carefully.\n  * Note: For date > 2016, records from 2015 are LESS than 2016, 2016 is NOT greater than 2016, and only records from 2017 are GREATER than 2016.\n  * State the exact count and list only the matching rows.\n- Always format tables in clean Markdown so they render nicely."
+        }
+      },
+      "id": "ai-agent",
+      "name": "AI Agent (Question Answering)",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [620, 360]
+    },
+    {
+      "parameters": {
+        "model": "llama3.2:3b",
+        "options": {
+          "temperature": 0.3,
+          "numCtx": 2048,
+          "numThread": 4,
+          "keepAlive": "15m"
+        }
+      },
+      "id": "ollama-chat-model",
+      "name": "Ollama Chat Model (llama3.2:3b)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [500, 560],
+      "credentials": {
+        "ollamaApi": {
+          "id": "ollamaLocal001",
+          "name": "Ollama Local Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionId || 'local-rag-session' }}",
+        "contextWindowLength": 5
+      },
+      "id": "window-buffer-memory",
+      "name": "Window Buffer Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [660, 560]
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolName": "qdrant_retriever",
+        "toolDescription": "Search the local Qdrant vector database for uploaded documents, spreadsheets (.xls, .xlsx, .csv), and files. Call this tool whenever the user asks about documents, files, data rows, or spreadsheet records.",
+        "qdrantCollection": {
+          "__rl": true,
+          "value": "documents",
+          "mode": "id"
+        },
+        "topK": 3,
+        "options": {}
+      },
+      "id": "qdrant-retrieve",
+      "name": "Qdrant Vector Store (Retrieve)",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1,
+      "position": [820, 560],
+      "credentials": {
+        "qdrantApi": {
+          "id": "qdrantCreds001",
+          "name": "Qdrant account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "nomic-embed-text:latest"
+      },
+      "id": "embeddings-ollama-retrieve",
+      "name": "Embeddings Ollama (Retrieve)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOllama",
+      "typeVersion": 1,
+      "position": [960, 720],
+      "credentials": {
+        "ollamaApi": {
+          "id": "ollamaLocal001",
+          "name": "Ollama Local Account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "Has File Attached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has File Attached?": {
+      "main": [
+        [
+          {
+            "node": "Qdrant Vector Store (Insert)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent (Question Answering)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Ollama (Insert)": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Qdrant Vector Store (Insert)",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Qdrant Vector Store (Insert)",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recursive Character Text Splitter": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Default Data Loader",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant Vector Store (Insert)": {
+      "main": [
+        [
+          {
+            "node": "Reply File Indexed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model (llama3.2:3b)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent (Question Answering)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window Buffer Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent (Question Answering)",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qdrant Vector Store (Retrieve)": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent (Question Answering)",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Ollama (Retrieve)": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Qdrant Vector Store (Retrieve)",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {},
+  "tags": []
+}

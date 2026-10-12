@@ -1,0 +1,15 @@
+# Universal RAG Agent & Local AI Data Analyst Dependencies
+fastapi>=0.110.0
+uvicorn>=0.28.0
+requests>=2.31.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+xlrd>=2.0.1
+openpyxl>=3.1.2
+pypdf>=4.1.0
+python-docx>=1.1.0
+python-pptx>=0.6.23
+duckdb>=1.0.0
+flashrank>=0.2.10
+fastembed>=0.9.0
+pdfplumber>=0.11.0

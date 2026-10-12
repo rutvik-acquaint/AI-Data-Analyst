@@ -1,0 +1,32 @@
+# ─── Python ───
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ─── Runtime Data (auto-created by start.sh) ───
+qdrant_data/
+ollama_data/
+n8n_data/
+duckdb_data/
+chat_data/
+chat_history.db
+
+# ─── Logs ───
+*.log
+reader_engine.log
+
+# ─── Backups ───
+*.bak
+
+# ─── OS / IDE ───
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── Docker ───
+docker-compose.override.yml

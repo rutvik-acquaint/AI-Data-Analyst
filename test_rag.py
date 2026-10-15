@@ -274,6 +274,111 @@ def test_phase3_features():
     except Exception as e:
         print(f"  ✗ Multi-turn follow-up test failed: {e}")
 
+def test_acceptance_routing_and_context():
+    """Acceptance tests for routing, identity, greetings, and context isolation."""
+    print("\n🎯 [Acceptance Tests] Running routing & context isolation test suite...")
+
+    # 1. With NO document active
+    no_doc_sid = f"acc-no-doc-{int(time.time())}"
+    r_no_doc = requests.post("http://localhost:8001/query", json={
+        "query": "what does the pdf say about Python?",
+        "session_id": no_doc_sid
+    }).json()
+    assert r_no_doc.get("route") == "RAG", f"Expected RAG, got {r_no_doc.get('route')}"
+    assert "no document is uploaded" in r_no_doc.get("answer", "").lower(), f"Unexpected answer: {r_no_doc.get('answer')}"
+    print("  ✓ No document active: Correctly returned 'No document is uploaded' guardrail.")
+
+    # 2. Ingest AI developer roadmap PDF
+    pdf_bytes = (
+        b'%PDF-1.4\n'
+        b'1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n'
+        b'2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n'
+        b'3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<\n'
+        b'/Font<</F1 4 0 R>>>>/Contents 5 0 R>>endobj\n'
+        b'4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n'
+        b'5 0 obj<</Length 230>>stream\n'
+        b'BT /F1 12 Tf 72 700 Td (AI Developer Roadmap: How to become an AI developer.) Tj\n'
+        b'0 -20 Td (To become an AI developer, learn Python, math, PyTorch, and NLP.) Tj\n'
+        b'0 -20 Td (The required tech stack consists of PyTorch, HuggingFace Transformers, and LangChain.) Tj ET\n'
+        b'endstream\nendobj\n'
+        b'xref\n0 6\n0000000000 65535 f \n0000000010 00000 n \n0000000060 00000 n \n0000000115 00000 n \n0000000224 00000 n \n0000000295 00000 n \n'
+        b'trailer<</Size 6/Root 1 0 R>>\nstartxref\n576\n%%EOF'
+    )
+    acc_sid = f"acc-roadmap-{int(time.time())}"
+    r_ingest = requests.post(
+        "http://localhost:8001/ingest",
+        files={"file": ("ai_developer_roadmap.pdf", pdf_bytes, "application/pdf")},
+        data={"session_id": acc_sid}
+    ).json()
+    assert r_ingest.get("status") == "success"
+    print(f"  ✓ Ingested active document '{r_ingest.get('active_document')}' into session.")
+
+    # 3. 'Hello' -> greeting only, zero mention of any document
+    r_hello = requests.post("http://localhost:8001/query", json={"query": "Hello", "session_id": acc_sid}).json()
+    assert r_hello.get("route") == "CONVERSATIONAL", f"Expected CONVERSATIONAL, got {r_hello.get('route')}"
+    ans_hello = r_hello.get("answer", "").lower()
+    assert "roadmap" not in ans_hello and "ai_developer_roadmap" not in ans_hello, f"Document context leaked into greeting! Answer: {r_hello.get('answer')}"
+    print(f"  ✓ Greeting isolated: '{r_hello.get('answer')}'")
+
+    # 4. 'how to become an ai developer and what tech stack is required as per pdf?' -> route=RAG, cites PDF, no mention of FastAPI/DuckDB/Qdrant
+    r_rag = requests.post("http://localhost:8001/query", json={
+        "query": "how to become an ai developer and what tech stack is required as per pdf?",
+        "session_id": acc_sid
+    }).json()
+    assert r_rag.get("route") == "RAG", f"Expected RAG, got {r_rag.get('route')}"
+    assert r_rag.get("target_document") == "ai_developer_roadmap.pdf", f"Expected ai_developer_roadmap.pdf, got {r_rag.get('target_document')}"
+    ans_rag = r_rag.get("answer", "")
+    assert "fastapi" not in ans_rag.lower() and "duckdb" not in ans_rag.lower() and "qdrant" not in ans_rag.lower(), "Self-description leaked into document answer!"
+    assert any(k in ans_rag.lower() for k in ["pytorch", "transformers", "langchain", "python"]), "PDF content not cited!"
+    print(f"  ✓ RAG document query answered from PDF: Route [{r_rag.get('route')}] | Doc: '{r_rag.get('target_document')}'")
+
+    # 5. 'what is your tech stack?' -> identity route (describes the app)
+    r_identity = requests.post("http://localhost:8001/query", json={
+        "query": "what is your tech stack?",
+        "session_id": acc_sid
+    }).json()
+    assert r_identity.get("route") == "CONVERSATIONAL", f"Expected CONVERSATIONAL, got {r_identity.get('route')}"
+    ans_id = r_identity.get("answer", "")
+    assert any(k in ans_id.lower() for k in ["fastapi", "duckdb", "qdrant", "ollama"]), f"App stack not described! Answer: {ans_id}"
+    print("  ✓ Identity query accurately describes assistant's own tech stack.")
+
+    # 6. 'summarize the pdf' -> RAG
+    r_sum = requests.post("http://localhost:8001/query", json={
+        "query": "summarize the pdf",
+        "session_id": acc_sid
+    }).json()
+    assert r_sum.get("route") == "RAG", f"Expected RAG, got {r_sum.get('route')}"
+    assert r_sum.get("target_document") == "ai_developer_roadmap.pdf"
+    print(f"  ✓ 'summarize the pdf' routed to RAG with doc '{r_sum.get('target_document')}'.")
+
+    # 7. 'what is 25 * 4?' -> conversational, answer 100
+    r_math = requests.post("http://localhost:8001/query", json={
+        "query": "what is 25 * 4?",
+        "session_id": acc_sid
+    }).json()
+    assert r_math.get("route") == "CONVERSATIONAL"
+    assert "100" in r_math.get("answer", "")
+    print(f"  ✓ Instant math: {r_math.get('answer')}")
+
+    # 8. Upload second file and verify questions only use the second file
+    second_file_bytes = b"Acme Company Policy: Remote work policy permits working remotely up to 3 days per week. Travel daily allowance is 75 USD."
+    r_ingest2 = requests.post(
+        "http://localhost:8001/ingest",
+        files={"file": ("company_policy_v2.txt", second_file_bytes, "text/plain")},
+        data={"session_id": acc_sid}
+    ).json()
+    assert r_ingest2.get("status") == "success"
+    assert r_ingest2.get("active_document") == "company_policy_v2.txt"
+
+    r_doc2 = requests.post("http://localhost:8001/query", json={
+        "query": "what is the remote work policy as per document?",
+        "session_id": acc_sid
+    }).json()
+    assert r_doc2.get("route") == "RAG"
+    assert r_doc2.get("target_document") == "company_policy_v2.txt", f"Expected company_policy_v2.txt, got {r_doc2.get('target_document')}"
+    assert any(k in r_doc2.get("answer", "").lower() for k in ["3 days", "remotely"]), f"Second file content missing: {r_doc2.get('answer')}"
+    print(f"  ✓ Second file switched and isolated: Doc '{r_doc2.get('target_document')}'")
+
 if __name__ == "__main__":
     check_services()
     if len(sys.argv) > 1 and sys.argv[1] == "--qa-only":
@@ -285,11 +390,14 @@ if __name__ == "__main__":
         test_hybrid_and_reranker()
     elif len(sys.argv) > 1 and sys.argv[1] == "--phase3-only":
         test_phase3_features()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--acceptance-only":
+        test_acceptance_routing_and_context()
     else:
         test_duckdb_sql()
         test_intelligent_router()
         test_hybrid_and_reranker()
         test_phase3_features()
+        test_acceptance_routing_and_context()
         test_flow_a_ingestion()
         time.sleep(2)
         check_qdrant_vectors()

@@ -1310,6 +1310,20 @@ class DuckDBEngine:
 # ==============================================================================
 class QueryRouter:
     """Classifies user queries to route them to Conversational AI, deterministic DuckDB SQL, or Hybrid RAG."""
+
+    DOC_REF_RE = re.compile(
+        r"\b(pdf|docx?|documents?|files?|sheet|spreadsheet|uploaded|"
+        r"as\s+p[er]{2,3}|according\s+to|based\s+on|"
+        r"in\s+the\s+(?:doc|document|pdf|file))\b", re.IGNORECASE)
+
+    IDENTITY_RE = re.compile(
+        r"\b(who\s+are\s+you|what\s+is\s+your\s+name|how\s+are\s+you|what\s+can\s+you\s+do|"
+        r"tell\s+me\s+about\s+yourself|introduce\s+yourself|"
+        r"your\s+(?:tech(?:nology)?\s+stack|architecture)|"
+        r"what\s+(?:tech(?:nologies)?|models?)\s+do\s+you\s+use|"
+        r"how\s+are\s+you\s+built|what\s+powers\s+you|how\s+do\s+you\s+work|"
+        r"are\s+you\s+(?:cloud|local|offline))\b", re.IGNORECASE)
+
     def __init__(self, duckdb_engine: DuckDBEngine):
         """Initializes the query classifier with access to the DuckDB engine to check table columns."""
         self.duckdb_engine = duckdb_engine
@@ -1367,29 +1381,31 @@ class QueryRouter:
         if QueryRouter.is_pure_math(query):
             return True
 
-        greetings = [
-            r"^(?:hi|hello|hey|heya|howdy|sup|greetings|good\s+(?:morning|afternoon|evening|day))[\s,!.]*",
-            r"\b(who\s+are\s+you|what\s+is\s+your\s+name|how\s+are\s+you|how's\s+it\s+going|what\s+can\s+you\s+do|tell\s+me\s+about\s+yourself|introduce\s+yourself)\b",
-            r"\b(tech(?:nology)?\s+stack|what\s+technologies|what\s+tech|how\s+are\s+you\s+built|what\s+powers\s+you|what\s+models?\s+do\s+you\s+use|are\s+you\s+(?:cloud|local|offline))\b",
-            r"\b(your\s+architecture|how\s+do\s+you\s+work|explain\s+your\s+system)\b",
-            r"\b(thank\s+you|thanks|thx|thank\s+you\s+so\s+much|appreciate\s+it)\b",
-            r"\b(goodbye|bye|see\s+you|cya|good\s+night)\b",
-            r"\b(tell\s+me\s+a\s+joke|make\s+me\s+laugh|say\s+something\s+funny)\b",
-            r"^(?:ok|okay|cool|great|awesome|nice|got\s+it|understood|perfect|help|help\s+me)[\s!.]*$"
-        ]
-        if any(re.search(p, q_clean) for p in greetings):
-            return True
-
         security_patterns = [
             r"\b(share|give|send|show|download|view|access|read|extract|leak|dump|reveal|expose)\s+(?:me\s+)?(?:your|the|any)?\s*(?:core|backend|internal|system|server)?\s*(?:python|source|code|program|script|file|repo|repository)\b",
             r"\b(?:your\s+)?(?:core\s+)?python\s+(?:program\s+)?file\b",
             r"\b(?:source\s+code|backend\s+code|server\s+code|core\s+code)\b",
             r"\b(where\s+is\s+your\s+code|where\s+is\s+your\s+file|share\s+your\s+code)\b",
             r"\b(share|give|leak|reveal|dump|show)\s+(?:me\s+)?(?:personal\s+data|pii|passwords?|secret\s+keys?|api\s+keys?|tokens?|credentials?)\b",
-            r"\b(security\s+policy|privacy\s+policy|data\s+protection)\b",
             r"\b(?:file_reader_engine\.py)\b"
         ]
         if any(re.search(p, q_clean) for p in security_patterns):
+            return True
+
+        if QueryRouter.DOC_REF_RE.search(q_clean):
+            return False
+
+        if QueryRouter.IDENTITY_RE.search(q_clean):
+            return True
+
+        greetings = [
+            r"^(?:hi|hello|hey|heya|howdy|sup|greetings|good\s+(?:morning|afternoon|evening|day))[\s,!.]*$",
+            r"\b(thank\s+you|thanks|thx|thank\s+you\s+so\s+much|appreciate\s+it)\b",
+            r"\b(goodbye|bye|see\s+you|cya|good\s+night)\b",
+            r"\b(tell\s+me\s+a\s+joke|make\s+me\s+laugh|say\s+something\s+funny)\b",
+            r"^(?:ok|okay|cool|great|awesome|nice|got\s+it|understood|perfect|help|help\s+me)[\s!.]*$"
+        ]
+        if any(re.search(p, q_clean) for p in greetings):
             return True
 
         return False
@@ -1402,17 +1418,19 @@ class QueryRouter:
         if self.is_conversational(query):
             return "CONVERSATIONAL"
 
+        sql_patterns = [
+            r"\b(how many|count|number of|total|sum|average|avg|mean|median|min|minimum|max|maximum|highest|lowest)\b",
+            r"\b(distribution|breakdown|group by|percentage|proportion|rank|ranking|top \d+|bottom \d+)\b",
+            r"\b(more than|greater than|less than|older than|younger than|before|after|between)\b",
+            r"\b(records? where|rows? where|>|<|=)\b",
+            r"\b(only\s+[a-z_]+\s+(?:names?|column|from|values?)|give me only)\b",
+            r"\b(list all\s+[a-z_]+)\b"
+        ]
+
         # If an active target document is set in the session, queries stay strictly grounded to RAG/SQL!
         if target_doc:
-            sql_patterns = [
-                r"\b(how many|count|number of|total|sum|average|avg|mean|median|min|minimum|max|maximum|highest|lowest)\b",
-                r"\b(distribution|breakdown|group by|percentage|proportion|rank|ranking|top \d+|bottom \d+)\b",
-                r"\b(more than|greater than|less than|older than|younger than|before|after|between)\b",
-                r"\b(records? where|rows? where|>|<|=)\b",
-                r"\b(only\s+[a-z_]+\s+(?:names?|column|from|values?)|give me only)\b",
-                r"\b(list all\s+[a-z_]+)\b"
-            ]
-            if any(re.search(p, q_lower) for p in sql_patterns):
+            is_tabular = target_doc.lower().endswith((".xls", ".xlsx", ".xlsm", ".csv", ".tsv"))
+            if is_tabular and any(re.search(p, q_lower) for p in sql_patterns):
                 return "SQL"
             return "RAG"
 
@@ -1922,10 +1940,28 @@ class ConversationalQueryRewriter:
 
         # If target_doc is active in the session, anchor search query to target_doc directly
         if target_doc:
+            expanded = re.sub(
+                r"\b(as\s+p[er]{2,3}|according\s+to|based\s+on)\s+(?:the\s+)?(?:pdf|documents?|files?|docs?)\b",
+                rf"\1 {target_doc}",
+                query,
+                flags=re.IGNORECASE
+            )
+            expanded = re.sub(
+                r"\b(in|from)\s+(?:the\s+)?(?:pdf|documents?|files?|docs?)\b",
+                rf"\1 {target_doc}",
+                expanded,
+                flags=re.IGNORECASE
+            )
+            expanded = re.sub(
+                r"\b(?:the|this)\s+(?:pdf|documents?|files?|docs?)\b",
+                target_doc,
+                expanded,
+                flags=re.IGNORECASE
+            )
             base_doc = os.path.splitext(target_doc)[0].lower()
-            if base_doc not in q_lower and target_doc.lower() not in q_lower:
-                return f"{query} ({target_doc})"
-            return query
+            if base_doc not in expanded.lower() and target_doc.lower() not in expanded.lower():
+                expanded = f"{expanded} ({target_doc})"
+            return expanded
 
         if not history or len(history) < 2:
             return query
@@ -2037,23 +2073,23 @@ def _get_conversational_instant_answer(query: str) -> Optional[str]:
         return f"**{clean_expr}** = **{math_val}**"
 
     clean_q = query.strip().lower().rstrip("?!. ")
-    if re.match(r"^(?:hi|hello|hey|heya|howdy|sup|greetings)$", clean_q):
+    if re.match(r"^(?:hi|hello|hey|heya|howdy|sup|greetings|good\s+(?:morning|afternoon|evening|day))$", clean_q):
         return "Hello! I am your local AI Data Analyst and Knowledge Assistant. How can I help you today with your documents or data?"
-    if re.search(r"\b(who\s+are\s+you|what\s+is\s+your\s+name|what\s+can\s+you\s+do|introduce\s+yourself)\b", clean_q):
+    if QueryRouter.IDENTITY_RE.search(clean_q):
+        if re.search(r"\b(your\s+tech(?:nology)?\s+stack|what\s+tech|powers\s+you|built)\b", clean_q):
+            return (
+                "I run **100% locally and privately on your computer** with zero cloud dependencies or external API fees (no AWS):\n\n"
+                "• **Core Microservice**: Local Python service powered by **FastAPI** & **Uvicorn**.\n"
+                "• **Local LLM**: **Ollama** running `llama3.2:3b` on your local hardware.\n"
+                "• **In-Process SQL Engine**: **DuckDB** for exact, sub-millisecond ANSI SQL queries directly on Excel and CSV datasets.\n"
+                "• **Vector Database**: **Qdrant** for high-dimensional hybrid search.\n"
+                "• **Dense Embeddings**: `nomic-embed-text` (768 dimensions) via Ollama.\n"
+                "• **Sparse Embeddings**: BAAI/bge BM25 via **FastEmbed** for keyword matching.\n"
+                "• **Neural Reranker**: **FlashRank** (`ms-marco-MiniLM-L-12-v2`) cross-encoder for high-precision retrieval.\n"
+                "• **User Interface**: Pure HTML5, Vanilla CSS, and Server-Sent Events (SSE) streaming.\n\n"
+                "All operations run strictly within your local environment, ensuring that your data, documents, and interactions remain 100% private."
+            )
         return "I am your local AI Data Analyst and Knowledge Assistant, running 100% privately and locally on your machine. I can query spreadsheets with exact DuckDB SQL, answer document questions via hybrid vector search, and assist you with custom tasks."
-    if re.search(r"\b(tech(?:nology)?\s+stack|what\s+technologies|what\s+tech|how\s+are\s+you\s+built|what\s+powers\s+you|what\s+models?\s+do\s+you\s+use|are\s+you\s+(?:cloud|local|offline))\b", clean_q):
-        return (
-            "I run **100% locally and privately on your computer** with zero cloud dependencies or external API fees (no AWS):\n\n"
-            "• **Core Microservice**: Local Python service powered by **FastAPI** & **Uvicorn**.\n"
-            "• **Local LLM**: **Ollama** running `llama3.2:3b` on your local hardware.\n"
-            "• **In-Process SQL Engine**: **DuckDB** for exact, sub-millisecond ANSI SQL queries directly on Excel and CSV datasets.\n"
-            "• **Vector Database**: **Qdrant** for high-dimensional hybrid search.\n"
-            "• **Dense Embeddings**: `nomic-embed-text` (768 dimensions) via Ollama.\n"
-            "• **Sparse Embeddings**: BAAI/bge BM25 via **FastEmbed** for keyword matching.\n"
-            "• **Neural Reranker**: **FlashRank** (`ms-marco-MiniLM-L-12-v2`) cross-encoder for high-precision retrieval.\n"
-            "• **User Interface**: Pure HTML5, Vanilla CSS, and Server-Sent Events (SSE) streaming.\n\n"
-            "All operations run strictly within your local environment, ensuring that your data, documents, and interactions remain 100% private."
-        )
 
     # Security & Privacy Policy Guardrail: Prohibit sharing internal source code, core files, and server paths
     if re.search(
@@ -2336,6 +2372,7 @@ async def ingest_file_endpoint(file: UploadFile = File(...), session_id: Optiona
         rag_result = indexer.ingest_document(doc)
         
         if session_id:
+            chat_history.get_or_create_session(session_id)
             chat_history.set_session_active_doc(session_id, file.filename)
         
         table_summary = duck_results[0] if duck_results else None
@@ -2370,6 +2407,29 @@ class UnifiedQueryRequest(BaseModel):
     top_k: int = 4
 
 
+def _prepare_request(req: UnifiedQueryRequest):
+    session_id = chat_history.get_or_create_session(req.session_id)
+    recent_msgs = chat_history.get_messages(session_id, limit=10)
+    active_doc = chat_history.get_session_active_doc(session_id)
+
+    if router.is_conversational(req.query):
+        target_doc, effective_query, route = None, req.query, "CONVERSATIONAL"
+    else:
+        explicit = catalog_manager.resolve_target_document(req.query, session_active_doc=active_doc)
+        target_doc = explicit or req.target_document or active_doc
+        if target_doc:
+            chat_history.set_session_active_doc(session_id, target_doc)
+        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=target_doc)
+        route = router.classify(req.query, target_doc=target_doc)
+
+    chat_history.add_message(session_id, "user", req.query, {
+        "rewritten_query": effective_query if effective_query != req.query else None,
+        "target_document": target_doc})
+    logger.info(f"[route] sid={session_id[:8]} q={req.query!r} eq={effective_query!r} "
+                f"doc={target_doc!r} route={route}")
+    return session_id, recent_msgs, target_doc, effective_query, route
+
+
 @app.post("/query")
 def unified_query_endpoint(req: UnifiedQueryRequest):
     """
@@ -2380,23 +2440,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
     - Routes conceptual questions to Qdrant Vector Search + LLM.
     """
     try:
-        session_id = chat_history.get_or_create_session(req.session_id)
-        recent_msgs = chat_history.get_messages(session_id, limit=10)
-        active_doc = chat_history.get_session_active_doc(session_id)
-        
-        # Resolve target document (from explicit query reference, request, or active session)
-        explicit_doc = catalog_manager.resolve_target_document(req.query, session_active_doc=active_doc)
-        target_doc = explicit_doc or req.target_document or active_doc
-        if target_doc:
-            chat_history.set_session_active_doc(session_id, target_doc)
-
-        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=target_doc)
-        chat_history.add_message(session_id, "user", req.query, {
-            "rewritten_query": effective_query if effective_query != req.query else None,
-            "target_document": target_doc
-        })
-
-        route = router.classify(effective_query, target_doc=target_doc)
+        session_id, recent_msgs, target_doc, effective_query, route = _prepare_request(req)
 
         # Route 0: Conversational & Everyday General Questions
         if route == "CONVERSATIONAL":
@@ -2460,6 +2504,25 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                 return res_data
             route = "RAG"
 
+        # Check if query references documents but none is uploaded/active in this session
+        if not target_doc and QueryRouter.DOC_REF_RE.search(req.query):
+            no_doc_msg = "No document is uploaded in this session. Please upload one first."
+            res_data = {
+                "query": req.query,
+                "rewritten_query": None,
+                "target_document": None,
+                "route": "RAG",
+                "answer": no_doc_msg,
+                "was_validated": True,
+                "corrections": [],
+                "sources": [],
+                "context_count": 0,
+                "weak_retrieval": True,
+                "session_id": session_id
+            }
+            chat_history.add_message(session_id, "assistant", no_doc_msg, res_data)
+            return res_data
+
         # Route 2: Semantic Hybrid RAG Search (Dense + BM25) + Cross-Encoder Reranker
         # Scoped strictly to target_doc if identified
         raw_hits = indexer.hybrid_search(effective_query, top_k=15, source_filter=target_doc)
@@ -2517,8 +2580,9 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                     "policy", "policies", "handbook", "table", "section", "clause", "page",
                     "dataset"
                 ])
-                or bool(target_doc and target_doc.lower() in effective_query.lower())
+                or bool(target_doc)
                 or bool(re.search(r"\b(in the (?:doc|document|pdf|file|table|sheet)|according to|as per|does it say|mentioned in|from the)\b", effective_query, re.IGNORECASE))
+                or bool(QueryRouter.DOC_REF_RE.search(effective_query))
             )
             if has_doc_intent:
                 fallback_ans = f"I couldn't find this information in your uploaded document{' (' + target_doc + ')' if target_doc else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."
@@ -2617,23 +2681,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
     """
     def event_generator():
         try:
-            session_id = chat_history.get_or_create_session(req.session_id)
-            recent_msgs = chat_history.get_messages(session_id, limit=10)
-            active_doc = chat_history.get_session_active_doc(session_id)
-
-            # Resolve target document (from explicit query reference, request, or active session)
-            explicit_doc = catalog_manager.resolve_target_document(req.query, session_active_doc=active_doc)
-            target_doc = explicit_doc or req.target_document or active_doc
-            if target_doc:
-                chat_history.set_session_active_doc(session_id, target_doc)
-
-            effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=target_doc)
-            chat_history.add_message(session_id, "user", req.query, {
-                "rewritten_query": effective_query if effective_query != req.query else None,
-                "target_document": target_doc
-            })
-
-            route = router.classify(effective_query, target_doc=target_doc)
+            session_id, recent_msgs, target_doc, effective_query, route = _prepare_request(req)
 
             # Route 0: Conversational & Everyday General Questions
             if route == "CONVERSATIONAL":
@@ -2726,6 +2774,23 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                     return
                 route = "RAG"
 
+            # Check if query references documents but none is uploaded/active in this session
+            if not target_doc and QueryRouter.DOC_REF_RE.search(req.query):
+                no_doc_msg = "No document is uploaded in this session. Please upload one first."
+                meta_event = {
+                    "type": "meta",
+                    "route": "RAG",
+                    "target_document": None,
+                    "sources": [],
+                    "weak_retrieval": True,
+                    "session_id": session_id
+                }
+                yield f"data: {json.dumps(meta_event)}\n\n"
+                yield f"data: {json.dumps({'type': 'token', 'content': no_doc_msg})}\n\n"
+                chat_history.add_message(session_id, "assistant", no_doc_msg, meta_event)
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
             # Scoped strictly to target_doc if identified
             raw_hits = indexer.hybrid_search(effective_query, top_k=15, source_filter=target_doc)
             
@@ -2781,8 +2846,9 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                         "policy", "policies", "handbook", "table", "section", "clause", "page",
                         "dataset"
                     ])
-                    or bool(target_doc and target_doc.lower() in effective_query.lower())
+                    or bool(target_doc)
                     or bool(re.search(r"\b(in the (?:doc|document|pdf|file|table|sheet)|according to|as per|does it say|mentioned in|from the)\b", effective_query, re.IGNORECASE))
+                    or bool(QueryRouter.DOC_REF_RE.search(effective_query))
                 )
                 if has_doc_intent:
                     fallback_msg = f"I couldn't find this information in your uploaded document{' (' + target_doc + ')' if target_doc else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."

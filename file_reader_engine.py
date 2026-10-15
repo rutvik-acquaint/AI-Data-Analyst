@@ -29,7 +29,6 @@ import datetime
 import logging
 import threading
 import sqlite3
-import asyncio
 import ast
 import operator
 import time
@@ -98,12 +97,79 @@ except ImportError:
 # ==============================================================================
 # Global Logger Setup
 # ==============================================================================
+import pandas as pd
+
+# ==============================================================================
+# Model & Global Constants (Tuned for 4-core, 15 GB CPU machine)
+# ==============================================================================
+OLLAMA_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
+ANSWER_MODEL = os.getenv('ANSWER_MODEL', 'llama3.2:3b')
+SQL_MODEL = os.getenv('SQL_MODEL', 'llama3.2:3b')   # or qwen2.5-coder:7b if available
+KEEP_ALIVE = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
+FENCE = chr(96) * 3
+MAX_ROWS = 5000
+MIN_RERANK_SCORE = 0.008
+
+MISSING = {'', 'none', 'nan', 'null', 'n/a', 'na', '-', '--'}
+NUMERIC_TYPES = ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT', 'FLOAT', 'DOUBLE', 'DECIMAL')
+PAGE_RE = re.compile(r'\n?--- Page (\d+) ---\n')
+_NUM = re.compile(r'^-?\d+(\.\d+)?$')
+_DATE = re.compile(r'^\d{4}-\d{2}(-\d{2})?')
+
+
+def clean_columns(headers: List[Any]) -> List[str]:
+    seen, out = {}, []
+    for i, h in enumerate(headers):
+        c = re.sub(r'[^a-z0-9]+', '_', str(h).lower()).strip('_') or f'col_{i + 1}'
+        if c[0].isdigit():
+            c = f'c_{c}'
+        seen[c] = seen.get(c, 0) + 1
+        out.append(c if seen[c] == 1 else f'{c}_{seen[c]}')
+    return out
+
+
+def coerce_series(s: pd.Series) -> pd.Series:
+    s = s.astype('string').str.strip()
+    s = s.mask(s.str.lower().isin(MISSING))
+    vals = s.dropna()
+    if vals.empty or vals.str.match(r'^0\d+$').any():   # keep IDs / zip codes as text
+        return s
+    strip = lambda x: x.str.replace(r'[,$€£₹\s]', '', regex=True).str.rstrip('%')
+    if pd.to_numeric(strip(vals), errors='coerce').notna().mean() >= 0.95:
+        full = pd.to_numeric(strip(s), errors='coerce')
+        if full.dropna().mod(1).eq(0).all():
+            return full.astype('Int64')
+        return full.astype('float64')
+    dt = pd.to_datetime(vals, errors='coerce', format='mixed')
+    if dt.notna().mean() >= 0.95:
+        return pd.to_datetime(s, errors='coerce', format='mixed')
+    return s
+
+
+def profile_table(con, table: str, max_values: int = 30) -> List[Dict[str, Any]]:
+    out = []
+    for name, typ, *_ in con.execute(f'DESCRIBE "{table}"').fetchall():
+        nulls, distinct = con.execute(
+            f'SELECT COUNT(*) - COUNT("{name}"), COUNT(DISTINCT "{name}") FROM "{table}"').fetchone()
+        p = {'name': name, 'orig_name': name, 'type': typ, 'nulls': nulls, 'distinct': distinct}
+        if typ.startswith(NUMERIC_TYPES) or typ.startswith(('DATE', 'TIMESTAMP')):
+            lo, hi = con.execute(f'SELECT MIN("{name}"), MAX("{name}") FROM "{table}"').fetchone()
+            p['min'], p['max'] = str(lo), str(hi)
+        elif typ == 'VARCHAR':
+            rows = con.execute(
+                f'SELECT "{name}" FROM "{table}" WHERE "{name}" IS NOT NULL '
+                f'GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT {max_values}').fetchall()
+            vals = [r[0] for r in rows]
+            p['values' if distinct <= max_values else 'sample'] = vals if distinct <= max_values else vals[:5]
+        out.append(p)
+    return out
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("rag_analyst")
-
 
 
 class UniversalFileReader:
@@ -657,6 +723,7 @@ class LocalRAGIndexer:
         self.embedding_model = embedding_model
         self.collection_name = collection_name
         self.sparse_model = None
+        self._has_sparse = None
         self._init_sparse_model()
 
     def _init_sparse_model(self):
@@ -667,99 +734,79 @@ class LocalRAGIndexer:
             except Exception:
                 self.sparse_model = None
 
-    def chunk_text(self, text: str, filename: str = "", chunk_size: int = 1500, chunk_overlap: int = 150) -> List[str]:
-        """
-        Splits text into high-context chunks.
-        - Compact documents (< 2500 chars) are kept intact in a single rich chunk.
-        - Every chunk starts with the document header so vector search never loses context.
-        """
-        if not text:
-            return []
-
-        clean_text = text.strip()
-        doc_header = f"[Source File: {filename}]\n" if filename else ""
-
-        # For compact files (like 10-50 row spreadsheets or short policies), keep unified!
-        if len(clean_text) <= 2500:
-            return [f"{doc_header}{clean_text}"]
-
-        sections = clean_text.split("\n\n")
+    def chunk_with_pages(self, text: str, filename: str, max_chars: int = 1200, overlap: int = 150) -> List[Tuple[str, Optional[int]]]:
+        """Page-aware text chunking with overlap and document filename header."""
+        header = f'[Source File: {filename}]\n'
+        parts = PAGE_RE.split(text)          # [pre, '1', body1, '2', body2, ...]
+        units = [(None, parts[0])] + [(int(parts[i]), parts[i + 1])
+                                       for i in range(1, len(parts) - 1, 2)]
         chunks = []
-        current_chunk = []
-        current_len = len(doc_header)
-
-        for sec in sections:
-            sec = sec.strip()
-            if not sec:
-                continue
-
-            sec_len = len(sec)
-            if current_len + sec_len + 2 <= chunk_size:
-                current_chunk.append(sec)
-                current_len += sec_len + 2
-            else:
-                if current_chunk:
-                    chunks.append(f"{doc_header}" + "\n\n".join(current_chunk))
-                if sec_len > chunk_size:
-                    # Split oversized sections by lines
-                    lines = sec.split("\n")
-                    sub_chunk = []
-                    sub_len = len(doc_header)
-                    for l in lines:
-                        if sub_len + len(l) + 1 <= chunk_size:
-                            sub_chunk.append(l)
-                            sub_len += len(l) + 1
-                        else:
-                            if sub_chunk:
-                                chunks.append(f"{doc_header}" + "\n".join(sub_chunk))
-                            sub_chunk = [l]
-                            sub_len = len(doc_header) + len(l) + 1
-                    if sub_chunk:
-                        chunks.append(f"{doc_header}" + "\n".join(sub_chunk))
-                    current_chunk = []
-                    current_len = len(doc_header)
-                else:
-                    current_chunk = [sec]
-                    current_len = len(doc_header) + sec_len
-
-        if current_chunk:
-            chunks.append(f"{doc_header}" + "\n\n".join(current_chunk))
-
+        for page, body in units:
+            body = body.strip()
+            start = 0
+            while body and start < len(body):
+                end = min(start + max_chars, len(body))
+                if end < len(body):
+                    cut = body.rfind('\n\n', start, end)
+                    if cut == -1:
+                        cut = body.rfind('\n', start, end)
+                    if cut > start + max_chars // 2:
+                        end = cut
+                piece = body[start:end].strip()
+                if piece:
+                    chunks.append((header + piece, page))
+                if end >= len(body):
+                    break
+                start = max(end - overlap, start + 1)
         return chunks
 
-    def get_embedding(self, text: str) -> List[float]:
-        """Calls local Ollama to generate 768-dim dense vector embeddings."""
-        resp = requests.post(
-            f"{self.ollama_url}/api/embeddings",
-            json={"model": self.embedding_model, "prompt": text},
-            timeout=120
-        )
-        resp.raise_for_status()
-        return resp.json()["embedding"]
+    def chunk_text(self, text: str, filename: str = "", chunk_size: int = 1500, chunk_overlap: int = 150) -> List[str]:
+        """Fallback chunking returning text list."""
+        pieces = self.chunk_with_pages(text, filename, max_chars=chunk_size, overlap=chunk_overlap)
+        return [c for c, _ in pieces]
 
-    def get_sparse_embedding(self, text: str) -> Optional[Dict[str, List[Any]]]:
-        """Generates BM25 sparse vectors with token indices and term weights."""
+    def get_embeddings(self, texts: List[str], prefix: str = 'search_document: ') -> List[List[float]]:
+        """Calls local Ollama /api/embed with task prefixes and keep_alive."""
+        resp = requests.post(
+            f'{self.ollama_url}/api/embed',
+            json={'model': self.embedding_model, 'input': [prefix + t for t in texts],
+                  'keep_alive': KEEP_ALIVE},
+            timeout=300)
+        resp.raise_for_status()
+        return resp.json()['embeddings']
+
+    def get_embedding(self, text: str, is_query: bool = False) -> List[float]:
+        """Calls local Ollama to generate 768-dim dense vector embedding with task prefix."""
+        prefix = 'search_query: ' if is_query else 'search_document: '
+        return self.get_embeddings([text], prefix)[0]
+
+    def get_sparse_embedding(self, text: str, is_query: bool = False) -> Optional[Dict[str, List[Any]]]:
+        """Generates BM25 sparse vectors with token indices and term weights (separate query method)."""
         if not self.sparse_model or not text:
             return None
         try:
-            vec = list(self.sparse_model.embed([text]))[0]
+            gen = self.sparse_model.query_embed(text) if is_query else self.sparse_model.embed([text])
+            vec = list(gen)[0]
             return {
-                "indices": vec.indices.tolist(),
-                "values": [round(float(v), 5) for v in vec.values.tolist()]
+                'indices': vec.indices.tolist(),
+                'values': [round(float(v), 5) for v in vec.values.tolist()]
             }
         except Exception:
             return None
 
     def collection_has_sparse_vectors(self) -> bool:
-        """Verifies if the Qdrant collection supports named 'sparse' vectors."""
+        """Verifies if the Qdrant collection supports named 'sparse' vectors (memoized)."""
+        if self._has_sparse is not None:
+            return self._has_sparse
         try:
-            r = requests.get(f"{self.qdrant_url}/collections/{self.collection_name}", timeout=5)
-            if r.status_code == 200:
-                conf = r.json().get("result", {}).get("config", {}).get("params", {})
-                return "sparse_vectors" in conf and "sparse" in conf.get("sparse_vectors", {})
+            r = requests.get(f'{self.qdrant_url}/collections/{self.collection_name}', timeout=5)
+            if r.status_code != 200:
+                return False
+            conf = r.json().get('result', {}).get('config', {}).get('params', {})
+            self._has_sparse = 'sparse' in conf.get('sparse_vectors', {})
+            return self._has_sparse
         except Exception:
-            pass
-        return False
+            return False
 
     def ensure_collection(self, dim: int = 768):
         """Ensures Qdrant collection exists with dense vector and named sparse vector schema."""
@@ -768,6 +815,7 @@ class LocalRAGIndexer:
             if r.status_code == 200:
                 conf = r.json().get("result", {}).get("config", {}).get("params", {})
                 if "sparse_vectors" in conf and "sparse" in conf.get("sparse_vectors", {}):
+                    self._has_sparse = True
                     return
                 logger.warning(f"Collection '{self.collection_name}' exists without sparse_vectors schema. Recreating...")
                 requests.delete(f"{self.qdrant_url}/collections/{self.collection_name}", timeout=10)
@@ -790,6 +838,7 @@ class LocalRAGIndexer:
             )
         except Exception:
             pass
+        self._has_sparse = None
 
     def delete_existing_file_vectors(self, filename: str):
         """Removes previous points for this filename so updates don't create stale duplicate chunks."""
@@ -809,82 +858,89 @@ class LocalRAGIndexer:
             pass
 
     def ingest_document(self, doc_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extracts, chunks, embeds (dense + sparse), and stores points in Qdrant collection."""
-        text = doc_data["text"]
-        metadata = doc_data.get("metadata", {})
-        filename = metadata.get("filename", "unknown")
-
-        chunks = self.chunk_text(text, filename=filename, chunk_size=1500, chunk_overlap=150)
-        if not chunks:
-            return {"status": "empty", "chunks_indexed": 0, "filename": filename}
+        """Extracts, chunks, embeds in batches of 16, and stores slim points in batches of 64 in Qdrant."""
+        text = doc_data['text']
+        metadata = doc_data.get('metadata', {})
+        filename = metadata.get('filename', 'unknown')
+        slim = {k: v for k, v in metadata.items() if k not in ('tables', 'sheets')}
+        pieces = self.chunk_with_pages(text, filename)
+        if not pieces:
+            return {'status': 'empty', 'chunks_indexed': 0, 'filename': filename}
 
         self.ensure_collection(dim=768)
         self.delete_existing_file_vectors(filename)
-
         has_sparse = self.collection_has_sparse_vectors()
+
+        texts = [c for c, _ in pieces]
+        dense = []
+        for i in range(0, len(texts), 16):
+            dense.extend(self.get_embeddings(texts[i:i + 16]))
+
         points = []
-        for idx, chunk in enumerate(chunks):
-            dense_vec = self.get_embedding(chunk)
-            sparse_vec = self.get_sparse_embedding(chunk) if has_sparse else None
-            point_id = str(uuid.uuid4())
-
-            # Hybrid vector format if sparse is configured, otherwise fallback to standard dense vector
+        for idx, ((chunk, page), dvec) in enumerate(zip(pieces, dense)):
             if has_sparse:
-                vec_data = {"": dense_vec}
-                if sparse_vec and sparse_vec.get("indices"):
-                    vec_data["sparse"] = sparse_vec
+                vec = {'': dvec}
+                sp = self.get_sparse_embedding(chunk)
+                if sp and sp.get('indices'):
+                    vec['sparse'] = sp
             else:
-                vec_data = dense_vec
-
+                vec = dvec
             points.append({
-                "id": point_id,
-                "vector": vec_data,
-                "payload": {
-                    "content": chunk,
-                    "source": filename,
-                    "metadata": {
-                        "source": filename,
-                        "file_type": doc_data.get("file_type", "txt"),
-                        "chunk_index": idx,
-                        "total_chunks": len(chunks),
-                        **metadata
+                'id': str(uuid.uuid4()),
+                'vector': vec,
+                'payload': {
+                    'content': chunk,
+                    'source': filename,
+                    'metadata': {
+                        **slim,
+                        'source': filename,
+                        'page': page,
+                        'file_type': doc_data.get('file_type', 'txt'),
+                        'chunk_index': idx,
+                        'total_chunks': len(pieces)
                     }
                 }
             })
 
-        res = requests.put(
-            f"{self.qdrant_url}/collections/{self.collection_name}/points?wait=true",
-            json={"points": points},
-            timeout=30
-        )
-        res.raise_for_status()
+        for i in range(0, len(points), 64):
+            res = requests.put(
+                f'{self.qdrant_url}/collections/{self.collection_name}/points?wait=true',
+                json={'points': points[i:i + 64]},
+                timeout=60
+            )
+            res.raise_for_status()
 
         return {
-            "status": "success",
-            "filename": filename,
-            "chunks_indexed": len(points),
-            "total_chars": len(text),
-            "is_hybrid": bool(has_sparse and self.sparse_model)
+            'status': 'success',
+            'filename': filename,
+            'chunks_indexed': len(points),
+            'total_chars': len(text),
+            'is_hybrid': bool(has_sparse and self.sparse_model)
         }
 
-    def hybrid_search(self, query: str, top_k: int = 15, source_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+    def hybrid_search(self, query: str, top_k: int = 15, source_filter: Optional[Union[str, List[str]]] = None) -> List[Dict[str, Any]]:
         """
         Executes native Qdrant Hybrid Fusion Search (RRF):
         - Prefetches dense semantic candidates (nomic-embed-text)
         - Prefetches sparse exact keyword candidates (BM25)
         - Fuses candidate rankings using Reciprocal Rank Fusion
-        - Supports optional exact source filtering to restrict search to a specific document.
+        - Supports optional exact source filtering to restrict search to one or multiple documents.
         """
-        dense_vec = self.get_embedding(query)
-        sparse_vec = self.get_sparse_embedding(query)
+        dense_vec = self.get_embedding(query, is_query=True)
+        sparse_vec = self.get_sparse_embedding(query, is_query=True)
 
         filter_clause = None
         if source_filter:
-            filter_clause = {
-                "must": [
-                    {"key": "metadata.source", "match": {"value": source_filter}}
-                ]
-            }
+            if isinstance(source_filter, (list, set, tuple)):
+                clean_filters = [str(s).strip() for s in source_filter if str(s).strip()]
+                if len(clean_filters) == 1:
+                    filter_clause = {"must": [{"key": "metadata.source", "match": {"value": clean_filters[0]}}]}
+                elif len(clean_filters) > 1:
+                    filter_clause = {"must": [{"key": "metadata.source", "match": {"any": clean_filters}}]}
+            else:
+                s_str = str(source_filter).strip()
+                if s_str:
+                    filter_clause = {"must": [{"key": "metadata.source", "match": {"value": s_str}}]}
 
         has_sparse = self.collection_has_sparse_vectors()
         # 1. Native Hybrid Search with RRF Fusion
@@ -1095,12 +1151,15 @@ class DuckDBEngine:
         self.db_path = db_path
         if duckdb:
             try:
-                self.con = duckdb.connect(self.db_path)
+                self.con = duckdb.connect(self.db_path, config={'enable_external_access': False})
+                self.con.execute('SET lock_configuration = true')
             except Exception:
                 try:
-                    self.con = duckdb.connect(self.db_path, read_only=True)
+                    self.con = duckdb.connect(self.db_path, read_only=True, config={'enable_external_access': False})
+                    self.con.execute('SET lock_configuration = true')
                 except Exception:
-                    self.con = duckdb.connect(":memory:")
+                    self.con = duckdb.connect(":memory:", config={'enable_external_access': False})
+                    self.con.execute('SET lock_configuration = true')
         else:
             self.con = None
         self.registry: Dict[str, Dict[str, Any]] = {}
@@ -1117,8 +1176,7 @@ class DuckDBEngine:
             for (tbl_name,) in tables:
                 if tbl_name in ["dataset", "active_table"]:
                     continue
-                col_info = self.con.execute(f'DESCRIBE "{tbl_name}"').fetchall()
-                cols = [{"name": c[0], "type": c[1]} for c in col_info]
+                cols = profile_table(self.con, tbl_name)
                 cnt = self.con.execute(f'SELECT COUNT(*) FROM "{tbl_name}"').fetchone()[0]
                 self.registry[tbl_name] = {
                     "table_name": tbl_name,
@@ -1134,8 +1192,8 @@ class DuckDBEngine:
         """Generates dynamic, high-value starter questions for newly loaded tables."""
         questions = [f"How many total records are in the dataset?"]
         cat_cols = [c["name"] for c in cols if c["type"] == "VARCHAR" and "id" not in c["name"].lower() and "name" not in c["name"].lower()]
-        num_cols = [c["name"] for c in cols if c["type"] in ["BIGINT", "DOUBLE"] and "id" not in c["name"].lower() and "col_0" not in c["name"].lower()]
-        date_cols = [c["name"] for c in cols if c["type"] == "DATE" or "date" in c["name"].lower()]
+        num_cols = [c["name"] for c in cols if c["type"].startswith(NUMERIC_TYPES) and "id" not in c["name"].lower() and "col_0" not in c["name"].lower()]
+        date_cols = [c["name"] for c in cols if c["type"].startswith(("DATE", "TIMESTAMP")) or "date" in c["name"].lower()]
 
         if cat_cols:
             questions.append(f"Show the count of records grouped by {cat_cols[0]}")
@@ -1148,91 +1206,54 @@ class DuckDBEngine:
         questions.append("List the top 5 records from the table")
         return questions[:4]
 
+    def make_table_name(self, filename: str, sheet: Any, used: set) -> str:
+        """Constructs unique, clean table names preventing collisions across workbooks and sheets."""
+        stem = re.sub(r'[^a-z0-9]+', '_', Path(filename).stem.lower()).strip('_') or 'file'
+        sh = re.sub(r'[^a-z0-9]+', '_', str(sheet).lower()).strip('_')
+        name = stem if sh in ('', 'data', 'main_data') else f'{stem}__{sh}'
+        if name[0].isdigit():
+            name = f't_{name}'
+        base, n = name, 2
+        while name in used or (name in self.registry
+                               and self.registry[name].get('source_file') not in (None, filename)):
+            name, n = f'{base}_{n}', n + 1
+        used.add(name)
+        return name
+
     def ingest_tables(self, filename: str, tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Ingests structured sheets/tables into DuckDB with automatic type casting."""
+        """Ingests structured sheets/tables into DuckDB with automatic type coercion and column profiling."""
         if not self.con or not tables:
             return []
-        results = []
+        self.delete_file_tables(filename)            # re-upload replaces only this file's tables
+        used, results = set(), []
         for tbl in tables:
-            sheet_name = tbl.get("sheet_name", "data")
-            raw_headers = tbl.get("headers", [])
-            raw_rows = tbl.get("data", [])
-            if not raw_headers or not raw_rows:
+            headers, rows = tbl.get('headers', []), tbl.get('data', [])
+            if not headers or not rows:
                 continue
-
-            clean_tbl = re.sub(r'[^a-zA-Z0-9_]', '_', sheet_name.lower().strip()).strip('_')
-            if not clean_tbl or re.match(r'^\d', clean_tbl):
-                clean_tbl = f"tbl_{clean_tbl or 'data'}"
-
-            col_defs = []
-            cols_meta = []
-            for idx, h in enumerate(raw_headers):
-                col_clean = re.sub(r'[^a-zA-Z0-9_]', '_', str(h).lower().strip()).strip('_')
-                if not col_clean or re.match(r'^\d', col_clean):
-                    col_clean = f"col_{col_clean or idx}"
-
-                col_vals = [str(r[idx]).strip() for r in raw_rows if idx < len(r) and str(r[idx]).strip() not in ("", "None")]
-                inferred_type = "VARCHAR"
-                if col_vals:
-                    if all(re.match(r'^-?\d+$', v) for v in col_vals):
-                        inferred_type = "BIGINT"
-                    elif all(re.match(r'^-?\d+(\.\d+)?$', v) for v in col_vals):
-                        inferred_type = "DOUBLE"
-                    elif all(re.match(r'^\d{4}-\d{2}-\d{2}$', v) for v in col_vals):
-                        inferred_type = "DATE"
-
-                col_defs.append(f'"{col_clean}" {inferred_type}')
-                sample_distinct = list(dict.fromkeys(col_vals[:5]))
-                cols_meta.append({
-                    "name": col_clean,
-                    "orig_name": str(h),
-                    "type": inferred_type,
-                    "sample": sample_distinct
-                })
-
-            self.con.execute(f'DROP TABLE IF EXISTS "{clean_tbl}"')
-            create_sql = f'CREATE TABLE "{clean_tbl}" ({", ".join(col_defs)})'
-            self.con.execute(create_sql)
-
-            cast_rows = []
-            for r in raw_rows:
-                row_tuple = []
-                for c_idx, c_meta in enumerate(cols_meta):
-                    val = r[c_idx] if c_idx < len(r) else None
-                    val_str = str(val).strip() if val is not None else ""
-                    if val_str in ("", "None"):
-                        row_tuple.append(None)
-                    elif c_meta["type"] == "BIGINT":
-                        try:
-                            row_tuple.append(int(float(val_str)))
-                        except Exception:
-                            row_tuple.append(None)
-                    elif c_meta["type"] == "DOUBLE":
-                        try:
-                            row_tuple.append(float(val_str))
-                        except Exception:
-                            row_tuple.append(None)
-                    else:
-                        row_tuple.append(val_str)
-                cast_rows.append(tuple(row_tuple))
-
-            placeholders = ", ".join(["?"] * len(cols_meta))
-            self.con.executemany(f'INSERT INTO "{clean_tbl}" VALUES ({placeholders})', cast_rows)
-
-            self.con.execute(f'CREATE OR REPLACE VIEW dataset AS SELECT * FROM "{clean_tbl}"')
-            self.con.execute(f'CREATE OR REPLACE VIEW active_table AS SELECT * FROM "{clean_tbl}"')
-            self.active_table = clean_tbl
-
-            questions = self._generate_suggested_questions(clean_tbl, cols_meta)
-            meta_record = {
-                "table_name": clean_tbl,
-                "source_file": filename,
-                "columns": cols_meta,
-                "total_rows": len(cast_rows),
-                "suggested_questions": questions
+            cols = clean_columns(headers)
+            w = len(cols)
+            df = pd.DataFrame([(list(r) + [None] * w)[:w] for r in rows], columns=cols)
+            for c in cols:
+                df[c] = coerce_series(df[c])
+            df = df.dropna(how='all')
+            name = self.make_table_name(filename, tbl.get('sheet_name', 'data'), used)
+            with self.lock:
+                self.con.register('_incoming', df)
+                self.con.execute(f'CREATE OR REPLACE TABLE "{name}" AS SELECT * FROM _incoming')
+                self.con.unregister('_incoming')
+                self.con.execute(f'CREATE OR REPLACE VIEW active_table AS SELECT * FROM "{name}"')
+                self.con.execute(f'CREATE OR REPLACE VIEW dataset AS SELECT * FROM "{name}"')
+            profile = profile_table(self.con, name)
+            meta = {
+                'table_name': name,
+                'source_file': filename,
+                'columns': profile,
+                'total_rows': len(df),
+                'suggested_questions': self._generate_suggested_questions(name, profile)
             }
-            self.registry[clean_tbl] = meta_record
-            results.append(meta_record)
+            self.registry[name] = meta
+            self.active_table = name
+            results.append(meta)
         return results
 
     def delete_file_tables(self, filename: str):
@@ -1240,7 +1261,7 @@ class DuckDBEngine:
         if not self.con:
             return
         with self.lock:
-            tbls_to_remove = [tbl for tbl, m in self.registry.items() if m.get("source_file") == filename]
+            tbls_to_remove = [tbl for tbl, m in self.registry.items() if tbl == filename or m.get("source_file") == filename]
             for tbl in tbls_to_remove:
                 try:
                     self.con.execute(f'DROP TABLE IF EXISTS "{tbl}"')
@@ -1257,32 +1278,24 @@ class DuckDBEngine:
                         pass
 
     def execute_query(self, sql_query: str) -> Dict[str, Any]:
-        """Executes a strictly read-only SELECT query against DuckDB."""
+        """Executes a strictly read-only single SELECT query against DuckDB."""
         if not self.con:
-            return {"success": False, "error": "DuckDB is not installed or available"}
-
-        clean_sql = sql_query.strip().rstrip(";")
-        first_word = clean_sql.split()[0].upper() if clean_sql.split() else ""
-        if first_word not in ["SELECT", "WITH", "DESCRIBE", "EXPLAIN", "SHOW"]:
-            return {
-                "success": False,
-                "error": f"Security violation: Only read-only SELECT queries are allowed. Attempted: '{first_word}'."
-            }
-
-        forbidden = ["DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "TRUNCATE", "ATTACH", "COPY", "PRAGMA", "EXEC"]
-        for bad in forbidden:
-            if re.search(rf"\b{bad}\b", clean_sql, re.IGNORECASE):
-                return {
-                    "success": False,
-                    "error": f"Security violation: Statement contains forbidden keyword '{bad}'."
-                }
+            return {'success': False, 'error': 'DuckDB is not available'}
+        clean_sql = sql_query.strip().rstrip(';')
+        try:
+            stmts = self.con.extract_statements(clean_sql)
+            if len(stmts) != 1 or stmts[0].type != duckdb.StatementType.SELECT:
+                return {'success': False, 'sql': clean_sql,
+                        'error': 'Only a single SELECT query is allowed.'}
+        except Exception as e:
+            return {'success': False, 'sql': clean_sql, 'error': f'Could not parse SQL: {e}'}
 
         try:
             t0 = time.perf_counter()
             cur = self.con.cursor()
             cur.execute(clean_sql)
             cols = [d[0] for d in cur.description] if cur.description else []
-            rows = cur.fetchall()
+            rows = cur.fetchmany(MAX_ROWS)
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
             clean_rows = []
@@ -1487,172 +1500,188 @@ class QueryRouter:
 
 
 # ==============================================================================
-# Text-to-SQL Engine with Self-Correction
+# Text-to-SQL Engine with Grounded Schema, Self-Correction & Explanations
 # ==============================================================================
+SQL_EXAMPLES = '''EXAMPLES (patterns only; use the real table and column names from the schema):
+Q: How many orders are there per status?
+SQL: SELECT status, COUNT(*) AS orders FROM orders GROUP BY status ORDER BY orders DESC
+Q: Top 5 customers by total revenue
+SQL: SELECT customer, SUM(amount) AS revenue FROM orders GROUP BY customer ORDER BY revenue DESC LIMIT 5
+Q: Monthly revenue in 2023
+SQL: SELECT date_trunc('month', order_date) AS month, SUM(amount) AS revenue FROM orders WHERE order_date >= DATE '2023-01-01' AND order_date < DATE '2024-01-01' GROUP BY 1 ORDER BY 1
+Q: What share of revenue comes from each region?
+SQL: SELECT region, SUM(amount) AS revenue, ROUND(100.0 * SUM(amount) / SUM(SUM(amount)) OVER (), 2) AS pct FROM orders GROUP BY region ORDER BY revenue DESC
+Q: Month over month revenue change
+SQL: WITH m AS (SELECT date_trunc('month', order_date) AS month, SUM(amount) AS revenue FROM orders GROUP BY 1) SELECT month, revenue, revenue - LAG(revenue) OVER (ORDER BY month) AS change FROM m ORDER BY month
+'''
+
+def last_sql_turn(msgs: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """Finds the most recent user question and assistant SQL query from chat history."""
+    for i in range(len(msgs) - 1, -1, -1):
+        sql = (msgs[i].get('metadata') or {}).get('sql_query')
+        if msgs[i].get('role') == 'assistant' and sql:
+            q = next((x['content'] for x in reversed(msgs[:i]) if x.get('role') == 'user'), '')
+            return {'question': q, 'sql': sql}
+    return None
+
+MAX_TABLE_ROWS = 50
+
+def markdown_table(cols: List[str], rows: List[List[Any]]) -> str:
+    """Formats SQL tabular results into clean GitHub-flavored markdown table."""
+    head = '| ' + ' | '.join(cols) + ' |\n| ' + ' | '.join(['---'] * len(cols)) + ' |'
+    body = '\n'.join('| ' + ' | '.join(str(v).replace('|', '/') for v in r) + ' |' for r in rows)
+    return head + '\n' + body
+
+def pick_chart(question: str, cols: List[str], rows: List[List[Any]]) -> Optional[Dict[str, Any]]:
+    """Chooses appropriate chart type (line, pie, bar) and prepares series data."""
+    if len(cols) < 2 or not (2 <= len(rows) <= 200):
+        return None
+    is_num = lambda i: all(_NUM.match(str(r[i])) for r in rows if str(r[i]) != '')
+    is_date = lambda i: all(_DATE.match(str(r[i])) for r in rows if str(r[i]) != '')
+    numeric = [i for i in range(len(cols)) if is_num(i)]
+    label_like = [i for i in numeric if re.search(r'(year|month|quarter|week|day|id|rank)$', cols[i].lower())]
+    measures = [i for i in numeric if i not in label_like]
+    dates = [i for i in range(len(cols)) if i not in numeric and is_date(i)]
+    cats = [i for i in range(len(cols)) if i not in numeric and i not in dates]
+    label = (dates or label_like or cats or [None])[0]
+    if label is None or not measures:
+        return None
+    if dates or label_like:
+        ctype = 'line'
+    elif len(rows) <= 8 and len(measures) == 1 and re.search(
+            r'share|percent|proportion|breakdown|distribution', question, re.IGNORECASE):
+        ctype = 'pie'
+    else:
+        ctype = 'bar'
+    rows = rows[:30] if ctype == 'bar' else rows
+    series = [{'label': cols[i].replace('_', ' ').title(),
+               'values': [float(r[i]) if str(r[i]) != '' else 0.0 for r in rows]} for i in measures]
+    return {'type': ctype, 'labels': [str(r[label]) for r in rows],
+            'values': series[0]['values'], 'label': series[0]['label'],
+            'category_label': cols[label].replace('_', ' ').title(),
+            **({'series': series} if len(series) > 1 else {})}
+
+
 class TextToSQLEngine:
-    """Translates natural language questions to DuckDB ANSI SQL with automated error recovery."""
+    """Translates natural language questions to DuckDB ANSI SQL with grounded schema and automated error recovery."""
     def __init__(self, duckdb_engine: DuckDBEngine, ollama_url: str = "http://localhost:11434"):
-        """Initializes the natural language to SQL translator with DuckDB connection and Ollama LLM endpoint."""
         self.duckdb_engine = duckdb_engine
         self.ollama_url = ollama_url
 
-    def get_schema_context(self) -> str:
-        """Builds a clean database schema prompt describing table names, columns, types, and sample values."""
-        if not self.duckdb_engine.registry:
-            return "No tables currently loaded."
+    def get_schema_context(self, tables: Optional[List[str]] = None) -> str:
+        """Builds rich schema context with allowed values for categories and ranges for numbers/dates."""
+        reg = self.duckdb_engine.registry
+        if tables is None:
+            tables = list(reg.keys())
+        lines = ['DATABASE SCHEMA (DuckDB):']
+        for t in tables:
+            if t not in reg:
+                continue
+            meta = reg[t]
+            lines.append(f'\nTABLE "{t}" ({meta["total_rows"]} rows)')
+            for c in meta.get('columns', []):
+                d = f'  - "{c["name"]}" {c["type"]}'
+                if c.get('values'):
+                    d += ' | allowed values: ' + ', '.join(repr(v) for v in c['values'])
+                elif 'min' in c and 'max' in c:
+                    d += f' | range: {c["min"]} to {c["max"]}'
+                elif c.get('sample'):
+                    d += ' | e.g. ' + ', '.join(repr(v) for v in c['sample'])
+                if c.get('nulls'):
+                    d += f' | {c["nulls"]} nulls'
+                lines.append(d)
+        return '\n'.join(lines)
 
-        lines = ["AVAILABLE TABLES AND SCHEMAS IN DUCKDB:"]
-        for tbl_name, meta in self.duckdb_engine.registry.items():
-            lines.append(f"\nTable: {tbl_name} (also accessible as 'dataset' or 'active_table')")
-            lines.append(f"Total Rows: {meta['total_rows']}")
-            lines.append("Columns:")
-            for col in meta["columns"]:
-                sample_str = f" - Sample values: {col['sample']}" if col.get("sample") else ""
-                lines.append(f"  - {col['name']} ({col['type']}){sample_str}")
-        return "\n".join(lines)
-
-    def generate_sql(self, query: str, previous_error: Optional[str] = None, failed_sql: Optional[str] = None) -> Optional[str]:
-        """Asks the local Ollama LLM to write a read-only DuckDB SQL query, with auto-retry and self-correction if an error occurs."""
-        schema_ctx = self.get_schema_context()
-        system_prompt = (
-            "You are an expert SQL Data Analyst for DuckDB.\n"
-            "Your task is to generate a single read-only SQL query in DuckDB dialect.\n\n"
-            f"{schema_ctx}\n\n"
-            "CRITICAL RULES:\n"
-            "1. Return ONLY the SQL query inside a ```sql ... ``` code block.\n"
-            "2. Write ONLY read-only SELECT or WITH statements.\n"
-            "3. Use exact column names as defined in the schema above.\n"
-            "4. For date comparisons (e.g. 'after 2016' or '> 2016'): use `date >= '2017-01-01'` or `EXTRACT(year FROM date) > 2016` or `strftime(date, '%Y') > '2016'`.\n"
-            "5. For names: if asked for user names, select `first_name` (or `first_name || ' ' || last_name` if both exist).\n"
-            "6. For counting, use `COUNT(*)` or `COUNT(column)`.\n"
-            "7. Do NOT include explanations, chatter, or markdown text outside the code block."
-        )
-
-        user_msg = f"User Request: {query}"
-        if previous_error and failed_sql:
-            user_msg += (
-                f"\n\nNOTE: Your previous SQL query `{failed_sql}` failed with error: `{previous_error}`.\n"
-                "Please correct the query to fix this error and return valid DuckDB SQL."
-            )
-
+    def generate_sql(self, query: str, tables: List[str], prev: Optional[Dict[str, str]] = None, feedback: Optional[str] = None) -> Optional[str]:
+        """Generates read-only DuckDB SQL using rich schema, few-shot examples, and feedback retries."""
+        system = (
+            'You are an expert data analyst writing DuckDB SQL.\n\n'
+            + self.get_schema_context(tables) + '\n\n'
+            'RULES:\n'
+            f'1. Return ONLY the SQL inside one {FENCE}sql block. No explanations.\n'
+            '2. One read-only SELECT or WITH statement.\n'
+            '3. Use only the tables and columns listed above, and double-quote identifiers.\n'
+            '4. For text filters, use the exact allowed values listed; map the user wording to the closest one. For free text, use ILIKE.\n'
+            "5. For dates, compare with DATE literals ('after 2016' means >= DATE '2017-01-01'); group with date_trunc().\n"
+            '6. Compute percentages, ratios and changes in SQL (window functions, LAG, SUM() OVER). Never leave arithmetic to the reader.\n'
+            '7. Lists and top-N questions get LIMIT 50 unless the user asks for all rows.\n'
+            "8. If the question cannot be answered from these columns, return exactly: SELECT 'UNANSWERABLE' AS reason\n\n"
+            + SQL_EXAMPLES)
+        user = f'User question: {query}'
+        if prev:
+            user = (f'Previous question: {prev["question"]}\nPrevious SQL: {prev["sql"]}\n'
+                    'If the new question refines the previous one, modify that SQL; otherwise write a new query.\n\n' + user)
+        if feedback:
+            user += f'\n\nYour last attempt did not work: {feedback}\nWrite a corrected query.'
         try:
-            res = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": "llama3.2:3b",
-                    "system": system_prompt,
-                    "prompt": user_msg,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_ctx": 1500}
-                },
-                timeout=45
-            ).json()
-            raw_text = res.get("response", "").strip()
-
-            m = re.search(r"```(?:sql)?\s*([\s\S]+?)\s*```", raw_text, re.IGNORECASE)
-            if m:
-                return m.group(1).strip()
-            if raw_text.upper().startswith("SELECT") or raw_text.upper().startswith("WITH"):
-                return raw_text.strip().rstrip(";")
-            return raw_text
+            res = requests.post(f'{self.ollama_url}/api/generate', json={
+                'model': SQL_MODEL, 'system': system, 'prompt': user, 'stream': False,
+                'keep_alive': KEEP_ALIVE,
+                'options': {'temperature': 0.0, 'num_ctx': 4096, 'num_predict': 400}},
+                timeout=90).json()
         except Exception as e:
+            logger.error(f'SQL generation failed: {e}')
             return None
+        raw = res.get('response', '').strip()
+        m = re.search(FENCE + r'(?:sql)?\s*([\s\S]+?)\s*' + FENCE, raw, re.IGNORECASE)
+        return (m.group(1) if m else raw).strip().rstrip(';')
 
-    def process_query(self, query: str) -> Dict[str, Any]:
-        """Handles the complete pipeline: generates SQL from natural language, executes it on DuckDB, and formats the result."""
-        sql = self.generate_sql(query)
-        if not sql:
-            return {
-                "success": False,
-                "error": "Failed to generate SQL query.",
-                "answer": "I was unable to translate your question into a SQL query."
-            }
+    def process_query(self, query: str, source_file: Optional[str] = None, prev: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Executes text-to-SQL with up to 3 retry loops on errors, zero rows, or NULL results."""
+        reg = self.duckdb_engine.registry
+        tables = [t for t, m in reg.items() if source_file and m.get('source_file') == source_file] or list(reg)
+        if not tables:
+            return {'success': False, 'answer': 'No tables are loaded. Upload a spreadsheet first.'}
+        feedback, sql, res = None, None, None
+        for _ in range(3):
+            sql = self.generate_sql(query, tables, prev=prev, feedback=feedback)
+            if not sql:
+                break
+            if 'UNANSWERABLE' in sql.upper():
+                cols = sorted({c['name'] for t in tables for c in reg[t].get('columns', [])})
+                return {'success': False, 'sql_query': sql,
+                        'answer': 'I cannot answer that from the loaded data. Available columns: ' + ', '.join(cols)}
+            res = self.duckdb_engine.execute_query(sql)
+            if not res['success']:
+                feedback = f'`{sql}` failed with: {res.get("error", "query failed")}'
+            elif res['row_count'] == 0:
+                feedback = f'`{sql}` returned 0 rows. Re-check filter values against the allowed values and date ranges.'
+            elif res['row_count'] == 1 and all(v in ('', 'None') for v in res['rows'][0]):
+                feedback = f'`{sql}` returned only NULL. Check column names and filters.'
+            else:
+                break
+        if not res or not res['success']:
+            err = res.get('error') if res else 'no SQL generated'
+            return {'success': False, 'sql_query': sql, 'error': err,
+                    'answer': f'I could not produce a working query ({err}). Try naming the column or filter you mean.'}
+        cols, rows, n = res['columns'], res['rows'], res['row_count']
+        base = {'success': True, 'sql_query': sql, 'execution_time_ms': res['execution_time_ms'],
+                'row_count': n, 'table_name': tables[0], 'raw_rows': rows[:200]}
+        if n == 0:
+            return {**base, 'answer': 'No records matched your question.', 'chart_data': None}
+        return {**base, 'answer': self.explain_result(query, sql, cols, rows, n),
+                'chart_data': pick_chart(query, cols, rows)}
 
-        res = self.duckdb_engine.execute_query(sql)
-
-        # Self-healing retry if SQL failed
-        if not res["success"]:
-            err_msg = res.get("error", "Unknown error")
-            retry_sql = self.generate_sql(query, previous_error=err_msg, failed_sql=sql)
-            if retry_sql and retry_sql != sql:
-                sql = retry_sql
-                res = self.duckdb_engine.execute_query(sql)
-
-        if not res["success"]:
-            return {
-                "success": False,
-                "sql_query": sql,
-                "error": res.get("error"),
-                "answer": f"SQL execution error: {res.get('error')}"
-            }
-
-        cols = res["columns"]
-        rows = res["rows"]
-        elapsed_ms = res["execution_time_ms"]
-        row_count = res["row_count"]
-
-        # Synthesize Answer
-        if row_count == 1 and len(cols) == 1:
-            val = rows[0][0]
-            header_name = cols[0].replace("_", " ").title()
-            answer_text = f"Based on a direct SQL query of the dataset, the **{header_name}** is **{val}**."
-        else:
-            md_lines = []
-            header_row = "| " + " | ".join(cols) + " |"
-            separator_row = "| " + " | ".join(["---"] * len(cols)) + " |"
-            md_lines.append(header_row)
-            md_lines.append(separator_row)
-            for r in rows[:100]:
-                md_lines.append("| " + " | ".join(r) + " |")
-
-            table_str = "\n".join(md_lines)
-            answer_text = f"Found **{row_count} matching record(s)**:\n\n{table_str}"
-
-        chart_data = None
-        if 1 < row_count <= 30:
-            try:
-                # Detect which column is categorical label and which is numeric
-                label_col_idx = 0
-                num_col_indices = []
-                for idx, c in enumerate(cols):
-                    # Check if column values can be parsed as float
-                    sample_vals = [r[idx] for r in rows if r[idx] != ""]
-                    if sample_vals and all(re.match(r'^-?\d+(\.\d+)?$', v) for v in sample_vals):
-                        num_col_indices.append(idx)
-                    else:
-                        label_col_idx = idx
-
-                if num_col_indices:
-                    primary_num_idx = num_col_indices[0]
-                    labels = [str(r[label_col_idx]) for r in rows]
-                    vals = [float(r[primary_num_idx]) if r[primary_num_idx] != "" else 0.0 for r in rows]
-                    chart_data = {
-                        "type": "bar",
-                        "labels": labels,
-                        "values": vals,
-                        "label": cols[primary_num_idx].replace("_", " ").title(),
-                        "category_label": cols[label_col_idx].replace("_", " ").title()
-                    }
-                    if len(num_col_indices) > 1:
-                        chart_data["series"] = [
-                            {
-                                "label": cols[idx].replace("_", " ").title(),
-                                "values": [float(r[idx]) if r[idx] != "" else 0.0 for r in rows]
-                            }
-                            for idx in num_col_indices
-                        ]
-            except Exception:
-                pass
-
-        return {
-            "success": True,
-            "answer": answer_text,
-            "sql_query": sql,
-            "execution_time_ms": elapsed_ms,
-            "row_count": row_count,
-            "chart_data": chart_data,
-            "table_name": self.duckdb_engine.active_table
-        }
+    def explain_result(self, question: str, sql: str, cols: List[str], rows: List[List[Any]], n: int) -> str:
+        """Explains query takeaway concisely and renders markdown result table."""
+        if n == 1 and len(cols) == 1:
+            return f'**{cols[0].replace("_", " ").title()}**: **{rows[0][0]}**'
+        table = markdown_table(cols, rows[:MAX_TABLE_ROWS])
+        note = f'\n\n_Showing the first {MAX_TABLE_ROWS} of {n} rows._' if n > MAX_TABLE_ROWS else ''
+        prompt = (
+            'You are a careful data analyst. Using ONLY the result rows below, answer the question in 2 to 4 sentences. '
+            'State the key number(s), mention the highest and lowest or the trend if visible, and note any assumption '
+            '(for example which column you treated as the measure). Never use a number that is not in the rows. Do not mention SQL.\n\n'
+            f'Question: {question}\nSQL used: {sql}\nColumns: {", ".join(cols)}\n'
+            f'Rows (first 30): {rows[:30]}\n\nAnswer:')
+        try:
+            r = requests.post(f'{self.ollama_url}/api/generate', json={
+                'model': ANSWER_MODEL, 'prompt': prompt, 'stream': False, 'keep_alive': KEEP_ALIVE,
+                'options': {'temperature': 0.2, 'num_ctx': 4096, 'num_predict': 200}}, timeout=60).json()
+            summary = r.get('response', '').strip()
+        except Exception:
+            summary = ''
+        return f'{summary}\n\n{table}{note}'.strip()
 
 
 # ==============================================================================
@@ -1715,19 +1744,50 @@ class ChatHistoryDB:
                 con.commit()
         return s_id
 
-    def set_session_active_doc(self, session_id: str, doc_name: str):
-        """Saves the active document name for this chat session so follow-up questions stay in context."""
+    def set_session_active_doc(self, session_id: str, doc_name: Optional[Union[str, List[str]]]):
+        """Saves the active document name(s) for this chat session so follow-up questions stay in context."""
+        if isinstance(doc_name, (list, tuple, set)):
+            clean_list = [str(x).strip() for x in doc_name if str(x).strip()]
+            val = json.dumps(clean_list) if clean_list else None
+        elif isinstance(doc_name, str):
+            s = doc_name.strip()
+            val = s if s else None
+        else:
+            val = None
+
         with self._get_con() as con:
-            con.execute("UPDATE sessions SET active_document = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (doc_name, session_id))
+            con.execute("UPDATE sessions SET active_document = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (val, session_id))
             con.commit()
 
-    def get_session_active_doc(self, session_id: str) -> Optional[str]:
-        """Retrieves the currently active document bound to this chat session."""
+    def get_session_active_doc(self, session_id: str) -> Optional[Union[str, List[str]]]:
+        """Retrieves the currently active document(s) bound to this chat session."""
         with self._get_con() as con:
             cur = con.cursor()
             cur.execute("SELECT active_document FROM sessions WHERE id = ?", (session_id,))
             row = cur.fetchone()
-            return row[0] if row and row[0] else None
+            if not row or not row[0]:
+                return None
+            val = row[0]
+            if val.startswith("[") and val.endswith("]"):
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    pass
+            return val
+
+    def get_session_active_docs(self, session_id: str) -> List[str]:
+        """Returns the list of active documents for this chat session."""
+        val = self.get_session_active_doc(session_id)
+        if not val:
+            return []
+        if isinstance(val, list):
+            return [str(x) for x in val if str(x).strip()]
+        val_str = str(val).strip()
+        if "," in val_str:
+            return [x.strip() for x in val_str.split(",") if x.strip()]
+        return [val_str]
 
     def add_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None):
         """Saves a new user or assistant message with timestamp and metadata into the chat history."""
@@ -1739,21 +1799,25 @@ class ChatHistoryDB:
                 (msg_id, session_id, role, content, meta_str)
             )
             if role == "user":
+                clean_title = re.sub(r"\s+", " ", content).strip()
+                title_preview = (clean_title[:38] + "...") if len(clean_title) > 38 else (clean_title or "Conversation")
                 con.execute(
-                    "UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND title = 'New Conversation'",
-                    (content[:40].strip() + ("..." if len(content) > 40 else ""), session_id)
+                    "UPDATE sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND (title IS NULL OR title = 'New Conversation' OR title = 'Untitled conversation' OR title = '')",
+                    (title_preview, session_id)
                 )
             else:
                 con.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
             con.commit()
 
     def get_messages(self, session_id: str, limit: int = 30) -> List[Dict[str, Any]]:
-        """Loads the recent conversation messages for a chat session in chronological order."""
+        """Loads the recent conversation messages for a chat session in chronological order using rowid."""
         with self._get_con() as con:
             cur = con.cursor()
             cur.execute(
-                "SELECT id, role, content, metadata_json, created_at FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
-                (session_id, limit)
+                'SELECT id, role, content, metadata_json, created_at FROM ('
+                '  SELECT rowid AS rid, * FROM messages WHERE session_id = ? '
+                '  ORDER BY rowid DESC LIMIT ?'
+                ') ORDER BY rid ASC', (session_id, limit)
             )
             rows = cur.fetchall()
             messages = []
@@ -1787,6 +1851,20 @@ class ChatHistoryDB:
             con.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             con.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             con.commit()
+
+
+def usable_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filters out bad or non-grounded assistant answers and their preceding user prompt from context."""
+    out = []
+    for m in msgs:
+        if m.get('role') == 'assistant':
+            meta = m.get('metadata') or {}
+            if meta.get('route') == 'CONVERSATIONAL' or meta.get('weak_retrieval'):
+                if out and out[-1].get('role') == 'user':
+                    out.pop()          # drop the question that got the bad answer
+                continue
+        out.append(m)
+    return out
 
 
 # ==============================================================================
@@ -1938,31 +2016,6 @@ class ConversationalQueryRewriter:
         """Rewrites ambiguous follow-up questions (with pronouns like it, this, they) into standalone search queries."""
         q_lower = query.lower().strip()
 
-        # If target_doc is active in the session, anchor search query to target_doc directly
-        if target_doc:
-            expanded = re.sub(
-                r"\b(as\s+p[er]{2,3}|according\s+to|based\s+on)\s+(?:the\s+)?(?:pdf|documents?|files?|docs?)\b",
-                rf"\1 {target_doc}",
-                query,
-                flags=re.IGNORECASE
-            )
-            expanded = re.sub(
-                r"\b(in|from)\s+(?:the\s+)?(?:pdf|documents?|files?|docs?)\b",
-                rf"\1 {target_doc}",
-                expanded,
-                flags=re.IGNORECASE
-            )
-            expanded = re.sub(
-                r"\b(?:the|this)\s+(?:pdf|documents?|files?|docs?)\b",
-                target_doc,
-                expanded,
-                flags=re.IGNORECASE
-            )
-            base_doc = os.path.splitext(target_doc)[0].lower()
-            if base_doc not in expanded.lower() and target_doc.lower() not in expanded.lower():
-                expanded = f"{expanded} ({target_doc})"
-            return expanded
-
         if not history or len(history) < 2:
             return query
 
@@ -2003,20 +2056,21 @@ class ConversationalQueryRewriter:
             res = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json={
-                    "model": "llama3.2:3b",
+                    "model": ANSWER_MODEL,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 30}
+                    "keep_alive": KEEP_ALIVE,
+                    "options": {"temperature": 0.1, "num_predict": 40}
                 },
-                timeout=8
+                timeout=20
             ).json()
             raw_text = res.get("response", "").strip().strip('"').strip("'")
             first_line = raw_text.split("\n")[0].strip()
             first_line = re.sub(r"^(?:standalone\s+query|rewritten\s+query|query):\s*", "", first_line, flags=re.IGNORECASE).strip().strip('"')
             if first_line and len(first_line) > 3:
                 return first_line
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"query rewrite failed, using raw query: {e}")
 
         return query
 
@@ -2149,6 +2203,15 @@ def _filter_reranked_passages(reranked_passages: List[Dict[str, Any]], is_summar
         filtered_passages.append(p)
     return filtered_passages
 
+def is_weak_retrieval(passages: List[Dict[str, Any]], is_summary: bool, is_task: bool) -> bool:
+    """Evaluates whether retrieval candidates are sufficiently strong or if they should trigger fallback."""
+    if not passages:
+        return True
+    if is_summary or is_task:
+        return False
+    score = passages[0].get('rerank_score')
+    return score is not None and score < MIN_RERANK_SCORE
+
 def _build_rag_prompt(
     effective_query: str,
     target_doc: Optional[str],
@@ -2168,9 +2231,14 @@ def _build_rag_prompt(
     else:
         is_summary = (not is_task_execution) and is_summary_query(effective_query, target_doc)
 
-    doc_name = target_doc or top_source or "document"
+    if isinstance(target_doc, list):
+        doc_name = ", ".join(target_doc) if target_doc else (top_source or "document")
+        is_spreadsheet = any(any(str(d).lower().endswith(ext) for ext in [".xls", ".xlsx", ".csv"]) for d in target_doc)
+    else:
+        doc_name = target_doc or top_source or "document"
+        is_spreadsheet = any(doc_name.lower().endswith(ext) for ext in [".xls", ".xlsx", ".csv"])
+
     is_resume = "resume" in doc_name.lower() or "cv" in doc_name.lower() or any("rutvik" in c.lower() for c in contexts)
-    is_spreadsheet = any(doc_name.lower().endswith(ext) for ext in [".xls", ".xlsx", ".csv"])
 
     combined_context = "\n\n---\n\n".join(contexts)
 
@@ -2309,14 +2377,121 @@ def health():
     }
 
 
+@app.get("/knowledge/sources")
+def get_knowledge_sources_endpoint():
+    """Returns all loaded knowledge sources across DuckDB (tables) and Qdrant (documents)."""
+    sources = []
+    seen_sources = set()
+
+    # 1. DuckDB Tables
+    if duckdb_engine and hasattr(duckdb_engine, "registry"):
+        for tbl_name, info in duckdb_engine.registry.items():
+            src_file = info.get("source_file") or tbl_name
+            seen_sources.add(src_file)
+            sources.append({
+                "id": tbl_name,
+                "name": tbl_name,
+                "source_file": src_file,
+                "type": "table",
+                "file_type": "spreadsheet",
+                "engine": "DuckDB",
+                "total_rows": info.get("total_rows", 0),
+                "columns": [c.get("name") for c in info.get("columns", [])],
+                "columns_count": len(info.get("columns", [])),
+                "suggested_questions": info.get("suggested_questions", []),
+                "status": "Ready"
+            })
+
+    # 2. Qdrant Indexed Document Files (PDF, DOCX, TXT, MD)
+    try:
+        res = requests.post(
+            f"{indexer.qdrant_url}/collections/{indexer.collection_name}/points/scroll",
+            json={"limit": 200, "with_payload": ["metadata.source", "metadata.file_type", "metadata.page"]},
+            timeout=5
+        )
+        if res.status_code == 200:
+            pts = res.json().get("result", {}).get("points", [])
+            doc_counts = {}
+            for p in pts:
+                m = p.get("payload", {}).get("metadata", {})
+                src = m.get("source")
+                if src and not re.match(r"^(?:blob|test)$", src):
+                    doc_counts[src] = doc_counts.get(src, 0) + 1
+
+            for doc_name, chunk_cnt in doc_counts.items():
+                if doc_name in seen_sources:
+                    continue
+                seen_sources.add(doc_name)
+                ext = os.path.splitext(doc_name)[1].lower().lstrip(".")
+                sources.append({
+                    "id": doc_name,
+                    "name": doc_name,
+                    "source_file": doc_name,
+                    "type": "document",
+                    "file_type": ext.upper() if ext else "DOC",
+                    "engine": "Qdrant",
+                    "chunks_count": chunk_cnt,
+                    "status": "Ready"
+                })
+    except Exception as e:
+        logger.warning(f"Error discovering Qdrant document sources: {e}")
+
+    return {
+        "status": "success",
+        "sources": sources,
+        "total": len(sources),
+        "tables": duckdb_engine.registry if duckdb_engine and hasattr(duckdb_engine, "registry") else {}
+    }
+
+
 @app.get("/tables")
 def get_tables_endpoint():
-    """Returns all loaded DuckDB tables, schemas, row counts, and starter questions."""
+    """Returns all loaded DuckDB tables and indexed knowledge sources."""
+    k_data = get_knowledge_sources_endpoint()
     return {
         "status": "success",
         "active_table": duckdb_engine.active_table,
-        "tables": duckdb_engine.registry
+        "tables": duckdb_engine.registry,
+        "sources": k_data.get("sources", []),
+        "documents": [s for s in k_data.get("sources", []) if s.get("type") == "document"]
     }
+
+
+class DeleteSourcePayload(BaseModel):
+    source_name: Optional[str] = None
+
+
+def _do_delete_source(target_name: str):
+    target = (target_name or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="Target source name cannot be empty")
+
+    logger.info(f"Removing knowledge source: {target}")
+    # 1. Remove vectors from Qdrant
+    indexer.delete_existing_file_vectors(target)
+
+    # 2. Remove table from DuckDB
+    duckdb_engine.delete_file_tables(target)
+
+    return {
+        "status": "success",
+        "deleted": target,
+        "message": f"Source '{target}' successfully deleted from knowledge library."
+    }
+
+
+@app.delete("/knowledge/sources/{source_name:path}")
+def delete_knowledge_source_path(source_name: str):
+    """Deletes an indexed document or table from Qdrant and DuckDB."""
+    return _do_delete_source(source_name)
+
+
+@app.post("/knowledge/sources/delete")
+def delete_knowledge_source_post(payload: DeleteSourcePayload):
+    """Deletes an indexed document or table via POST."""
+    if not payload.source_name:
+        raise HTTPException(status_code=400, detail="Missing source_name")
+    return _do_delete_source(payload.source_name)
 
 
 class DirectSQLRequest(BaseModel):
@@ -2368,6 +2543,10 @@ async def ingest_file_endpoint(file: UploadFile = File(...), session_id: Optiona
         else:
             duckdb_engine.delete_file_tables(file.filename)
 
+        if duck_results:
+            doc['text'] = f'# Dataset: {file.filename}\n\n' + '\n\n'.join(
+                text_to_sql.get_schema_context([m['table_name']]) for m in duck_results)
+
         # Ingest into Qdrant Vector Store
         rag_result = indexer.ingest_document(doc)
         
@@ -2403,24 +2582,62 @@ async def ingest_file_endpoint(file: UploadFile = File(...), session_id: Optiona
 class UnifiedQueryRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
-    target_document: Optional[str] = None
+    target_document: Optional[Union[str, List[str]]] = None
+    target_doc: Optional[Union[str, List[str]]] = None
+    target_documents: Optional[List[str]] = None
+    route: Optional[str] = None
     top_k: int = 4
 
 
 def _prepare_request(req: UnifiedQueryRequest):
     session_id = chat_history.get_or_create_session(req.session_id)
-    recent_msgs = chat_history.get_messages(session_id, limit=10)
-    active_doc = chat_history.get_session_active_doc(session_id)
+    recent_msgs = usable_history(chat_history.get_messages(session_id, limit=10))
+
+    # Parse incoming client documents (supports list, JSON array string, comma string, or single string)
+    client_raw = req.target_documents if req.target_documents is not None else (
+        req.target_document if req.target_document is not None else req.target_doc
+    )
+
+    if client_raw is not None:
+        if isinstance(client_raw, (list, tuple, set)):
+            user_specified_docs = [str(x).strip() for x in client_raw if str(x).strip()]
+        elif isinstance(client_raw, str):
+            s = client_raw.strip()
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    user_specified_docs = [str(x).strip() for x in json.loads(s) if str(x).strip()]
+                except Exception:
+                    user_specified_docs = [s]
+            elif "," in s:
+                user_specified_docs = [x.strip() for x in s.split(",") if x.strip()]
+            elif s:
+                user_specified_docs = [s]
+            else:
+                user_specified_docs = []
+        else:
+            user_specified_docs = []
+        chat_history.set_session_active_doc(session_id, user_specified_docs)
+    else:
+        user_specified_docs = chat_history.get_session_active_docs(session_id)
 
     if router.is_conversational(req.query):
         target_doc, effective_query, route = None, req.query, "CONVERSATIONAL"
     else:
-        explicit = catalog_manager.resolve_target_document(req.query, session_active_doc=active_doc)
-        target_doc = explicit or req.target_document or active_doc
+        if len(user_specified_docs) > 1:
+            target_doc = user_specified_docs
+        elif len(user_specified_docs) == 1:
+            target_doc = user_specified_docs[0]
+        else:
+            explicit = catalog_manager.resolve_target_document(req.query, session_active_doc=None)
+            target_doc = explicit if explicit else None
+
         if target_doc:
             chat_history.set_session_active_doc(session_id, target_doc)
-        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=target_doc)
-        route = router.classify(req.query, target_doc=target_doc)
+
+        fallback_single = target_doc if isinstance(target_doc, str) else (target_doc[0] if target_doc else None)
+        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=fallback_single)
+        route_target = fallback_single
+        route = req.route or router.classify(req.query, target_doc=route_target)
 
     chat_history.add_message(session_id, "user", req.query, {
         "rewritten_query": effective_query if effective_query != req.query else None,
@@ -2455,10 +2672,11 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                     llm_res = requests.post(
                         f"{indexer.ollama_url}/api/generate",
                         json={
-                            "model": "llama3.2:3b",
+                            "model": ANSWER_MODEL,
                             "system": conv_system,
                             "prompt": effective_query,
                             "stream": False,
+                            "keep_alive": KEEP_ALIVE,
                             "options": {"temperature": 0.4, "num_ctx": 2048, "num_predict": 400, "num_thread": 4}
                         },
                         timeout=120
@@ -2485,14 +2703,18 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
 
         # Route 1: Deterministic SQL Execution
         if route == "SQL":
-            sql_res = text_to_sql.process_query(effective_query)
-            if sql_res.get("success"):
+            target_list = [target_doc] if isinstance(target_doc, str) else (target_doc or [])
+            is_spreadsheet = any(any(str(d).lower().endswith(ext) for ext in [".xls", ".xlsx", ".csv"]) for d in target_list)
+            sql_source = target_doc if isinstance(target_doc, str) else (target_doc[0] if target_doc else None)
+            sql_res = text_to_sql.process_query(effective_query, source_file=sql_source, prev=last_sql_turn(recent_msgs))
+            if sql_res.get("success") or is_spreadsheet:
+                ans = sql_res.get("answer", "No records matched your question.")
                 res_data = {
                     "query": req.query,
                     "rewritten_query": effective_query if effective_query != req.query else None,
                     "target_document": target_doc,
                     "route": "SQL",
-                    "answer": sql_res["answer"],
+                    "answer": ans,
                     "sql_query": sql_res.get("sql_query"),
                     "execution_time_ms": sql_res.get("execution_time_ms"),
                     "row_count": sql_res.get("row_count"),
@@ -2500,7 +2722,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                     "table_name": sql_res.get("table_name"),
                     "session_id": session_id
                 }
-                chat_history.add_message(session_id, "assistant", sql_res["answer"], res_data)
+                chat_history.add_message(session_id, "assistant", ans, res_data)
                 return res_data
             route = "RAG"
 
@@ -2534,8 +2756,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
             meta = payload.get("metadata", {})
             score = hit.get("score", 0.0)
             if content:
-                page_m = re.search(r"---\s*Page\s*(\d+)\s*---", content, re.IGNORECASE)
-                page = int(page_m.group(1)) if page_m else meta.get("page")
+                page = meta.get("page")
                 snippet = re.sub(r"---\s*Page\s*\d+\s*---\s*", "", content).strip()
                 if len(snippet) > 240:
                     snippet = snippet[:240].strip() + "..."
@@ -2551,27 +2772,17 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
         is_summary = is_summary_query(effective_query, target_doc)
 
         # Apply Local Cross-Encoder Reranker (ms-marco-MiniLM-L-12-v2)
-        reranked_passages = reranker.rerank(effective_query, candidate_passages, top_k=req.top_k)
+        reranked_passages = reranker.rerank(effective_query, candidate_passages, top_k=max(req.top_k, 8))
         filtered_passages = _filter_reranked_passages(reranked_passages, is_summary=is_summary)
 
-        contexts = [p["content"] for p in (filtered_passages[:6] if is_summary else filtered_passages[:3])]
+        contexts = [p["content"] for p in (filtered_passages[:6] if is_summary else filtered_passages[:5])]
         top_source = filtered_passages[0]["source"] if filtered_passages else "document"
         system_prompt, pred_tokens, is_summary, is_task_execution, combined_context = _build_rag_prompt(
             effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=recent_msgs
         )
 
-        is_weak = False
-        if not filtered_passages:
-            is_weak = True
-        else:
-            top_score = filtered_passages[0].get("rerank_score", 1.0)
-            is_target_match = bool(target_doc and filtered_passages[0].get("source") == target_doc)
-            if is_summary or is_task_execution or is_target_match:
-                if top_score < 1e-4 and not is_target_match:
-                    is_weak = True
-            else:
-                if top_score < 0.008:
-                    is_weak = True
+        is_weak = is_weak_retrieval(filtered_passages, is_summary, is_task_execution)
+        logger.info(f'[rag] top_score={filtered_passages[0].get("rerank_score") if filtered_passages else None} weak={is_weak}')
 
         if is_weak:
             has_doc_intent = (
@@ -2585,7 +2796,8 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                 or bool(QueryRouter.DOC_REF_RE.search(effective_query))
             )
             if has_doc_intent:
-                fallback_ans = f"I couldn't find this information in your uploaded document{' (' + target_doc + ')' if target_doc else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."
+                doc_label = ", ".join(target_doc) if isinstance(target_doc, list) else (target_doc or "")
+                fallback_ans = f"I couldn't find this information in your uploaded document{' (' + doc_label + ')' if doc_label else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."
             else:
                 try:
                     gen_prompt = (
@@ -2596,9 +2808,10 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                     gen_res = requests.post(
                         f"{indexer.ollama_url}/api/generate",
                         json={
-                            "model": "llama3.2:3b",
+                            "model": ANSWER_MODEL,
                             "prompt": gen_prompt,
                             "stream": False,
+                            "keep_alive": KEEP_ALIVE,
                             "options": {"temperature": 0.4, "num_ctx": 2048, "num_predict": 400, "num_thread": 4}
                         },
                         timeout=60
@@ -2626,22 +2839,23 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
         sources = [
             {
                 "source": p["source"],
-                "page": p["page"],
+                "page": p.get("page"),
                 "snippet": p["snippet"],
                 "score": p.get("rerank_score", p.get("score", 0.0)),
                 "is_reranked": bool("rerank_score" in p)
             }
-            for p in filtered_passages[:3]
+            for p in filtered_passages[:5]
         ]
 
         llm_res = requests.post(
             f"{indexer.ollama_url}/api/generate",
             json={
-                "model": "llama3.2:3b",
+                "model": ANSWER_MODEL,
                 "system": system_prompt,
                 "prompt": effective_query,
                 "stream": False,
-                "options": {"temperature": 0.3, "num_ctx": 4096, "num_predict": pred_tokens, "num_thread": 4}
+                "keep_alive": KEEP_ALIVE,
+                "options": {"temperature": 0.15, "num_ctx": 8192, "num_predict": pred_tokens, "num_thread": 4}
             },
             timeout=120
         ).json()
@@ -2716,10 +2930,11 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                     ollama_stream = requests.post(
                         f"{indexer.ollama_url}/api/generate",
                         json={
-                            "model": "llama3.2:3b",
+                            "model": ANSWER_MODEL,
                             "system": conv_system,
                             "prompt": effective_query,
                             "stream": True,
+                            "keep_alive": KEEP_ALIVE,
                             "options": {"temperature": 0.4, "num_ctx": 2048, "num_predict": 400, "num_thread": 4}
                         },
                         stream=True,
@@ -2745,8 +2960,12 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                 return
 
             if route == "SQL":
-                sql_res = text_to_sql.process_query(effective_query)
-                if sql_res.get("success"):
+                target_list = [target_doc] if isinstance(target_doc, str) else (target_doc or [])
+                is_spreadsheet = any(any(str(d).lower().endswith(ext) for ext in [".xls", ".xlsx", ".csv"]) for d in target_list)
+                sql_source = target_doc if isinstance(target_doc, str) else (target_doc[0] if target_doc else None)
+                sql_res = text_to_sql.process_query(effective_query, source_file=sql_source, prev=last_sql_turn(recent_msgs))
+                if sql_res.get("success") or is_spreadsheet:
+                    ans_text = sql_res.get("answer", "No records matched your question.")
                     meta_event = {
                         "type": "meta",
                         "route": "SQL",
@@ -2762,7 +2981,6 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                     }
                     yield f"data: {json.dumps(meta_event)}\n\n"
                     
-                    ans_text = sql_res["answer"]
                     words = ans_text.split(" ")
                     for i, w in enumerate(words):
                         chunk = w + (" " if i < len(words) - 1 else "")
@@ -2801,8 +3019,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                 meta = payload.get("metadata", {})
                 score = hit.get("score", 0.0)
                 if content:
-                    page_m = re.search(r"---\s*Page\s*(\d+)\s*---", content, re.IGNORECASE)
-                    page = int(page_m.group(1)) if page_m else meta.get("page")
+                    page = meta.get("page")
                     snippet = re.sub(r"---\s*Page\s*\d+\s*---\s*", "", content).strip()
                     if len(snippet) > 240:
                         snippet = snippet[:240].strip() + "..."
@@ -2817,27 +3034,17 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
             # Check summary intent
             is_summary = is_summary_query(effective_query, target_doc)
 
-            reranked_passages = reranker.rerank(effective_query, candidate_passages, top_k=req.top_k)
+            reranked_passages = reranker.rerank(effective_query, candidate_passages, top_k=max(req.top_k, 8))
             filtered_passages = _filter_reranked_passages(reranked_passages, is_summary=is_summary)
 
-            contexts = [p["content"] for p in (filtered_passages[:6] if is_summary else filtered_passages[:3])]
+            contexts = [p["content"] for p in (filtered_passages[:6] if is_summary else filtered_passages[:5])]
             top_source = filtered_passages[0]["source"] if filtered_passages else "document"
             system_prompt, pred_tokens, is_summary, is_task_execution, combined_context = _build_rag_prompt(
                 effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=recent_msgs
             )
 
-            is_weak = False
-            if not filtered_passages:
-                is_weak = True
-            else:
-                top_score = filtered_passages[0].get("rerank_score", 1.0)
-                is_target_match = bool(target_doc and filtered_passages[0].get("source") == target_doc)
-                if is_summary or is_task_execution or is_target_match:
-                    if top_score < 1e-4 and not is_target_match:
-                        is_weak = True
-                else:
-                    if top_score < 0.008:
-                        is_weak = True
+            is_weak = is_weak_retrieval(filtered_passages, is_summary, is_task_execution)
+            logger.info(f'[rag] top_score={filtered_passages[0].get("rerank_score") if filtered_passages else None} weak={is_weak}')
                     
             if is_weak:
                 has_doc_intent = (
@@ -2851,7 +3058,8 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                     or bool(QueryRouter.DOC_REF_RE.search(effective_query))
                 )
                 if has_doc_intent:
-                    fallback_msg = f"I couldn't find this information in your uploaded document{' (' + target_doc + ')' if target_doc else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."
+                    doc_label = ", ".join(target_doc) if isinstance(target_doc, list) else (target_doc or "")
+                    fallback_msg = f"I couldn't find this information in your uploaded document{' (' + doc_label + ')' if doc_label else ''}. Please verify that the relevant document or section has been uploaded, or try rephrasing your question."
                 else:
                     try:
                         gen_prompt = (
@@ -2862,9 +3070,10 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                         gen_res = requests.post(
                             f"{indexer.ollama_url}/api/generate",
                             json={
-                                "model": "llama3.2:3b",
+                                "model": ANSWER_MODEL,
                                 "prompt": gen_prompt,
                                 "stream": False,
+                                "keep_alive": KEEP_ALIVE,
                                 "options": {"temperature": 0.4, "num_ctx": 2048, "num_predict": 400, "num_thread": 4}
                             },
                             timeout=60
@@ -2890,12 +3099,12 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
             sources = [
                 {
                     "source": p["source"],
-                    "page": p["page"],
+                    "page": p.get("page"),
                     "snippet": p["snippet"],
                     "score": p.get("rerank_score", p.get("score", 0.0)),
                     "is_reranked": bool("rerank_score" in p)
                 }
-                for p in filtered_passages[:3]
+                for p in filtered_passages[:5]
             ]
 
             meta_event = {
@@ -2915,11 +3124,12 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
             ollama_stream = requests.post(
                 f"{indexer.ollama_url}/api/generate",
                 json={
-                    "model": "llama3.2:3b",
+                    "model": ANSWER_MODEL,
                     "system": system_prompt,
                     "prompt": effective_query,
                     "stream": True,
-                    "options": {"temperature": 0.3, "num_ctx": 4096, "num_predict": pred_tokens, "num_thread": 4}
+                    "keep_alive": KEEP_ALIVE,
+                    "options": {"temperature": 0.15, "num_ctx": 8192, "num_predict": pred_tokens, "num_thread": 4}
                 },
                 stream=True,
                 timeout=120
@@ -2962,6 +3172,24 @@ def clear_chat_session(session_id: str):
     """API endpoint: clears and deletes a chat session and its message history."""
     chat_history.clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+class ActiveDocRequest(BaseModel):
+    active_document: Optional[Union[str, List[str]]] = None
+    active_documents: Optional[List[str]] = None
+
+
+@app.post("/chat/sessions/{session_id}/active_doc")
+def update_session_active_doc_endpoint(session_id: str, req: ActiveDocRequest):
+    """API endpoint: updates or clears the active document(s) for a specific chat session."""
+    chat_history.get_or_create_session(session_id)
+    docs = req.active_documents if req.active_documents is not None else req.active_document
+    chat_history.set_session_active_doc(session_id, docs)
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "active_document": docs
+    }
 
 
 class ValidationRequest(BaseModel):

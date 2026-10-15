@@ -285,6 +285,17 @@ AI-Data-Analyst/
 
 ---
 
+## 🧪 Testing & Verification
+
+You can independently verify the system's health, accuracy, and stability with the built-in regression test suite:
+
+```bash
+.venv/bin/python3 test_rag.py
+```
+_Tests Docker service health, hybrid vector retrieval, FlashRank cross-encoder reranking, weak retrieval guardrails, and conversational reasoning._
+
+---
+
 ## 🧩 Tech Stack — What Powers This Project & Why
 
 Every technology was hand-picked to keep the system **100% local, private, fast, and free**. Here is a plain-English breakdown:

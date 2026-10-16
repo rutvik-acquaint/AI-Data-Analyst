@@ -182,13 +182,13 @@ else
 fi
 
 # Check and install python dependencies
-echo -n "  - Checking Python dependencies (FastAPI, DuckDB, FlashRank, FastEmbed, pdfplumber)... "
-if ! "$PY_EXEC" -c "import fastapi, uvicorn, requests, xlrd, openpyxl, pypdf, docx, pptx, multipart, duckdb, flashrank, fastembed, pdfplumber" >/dev/null 2>&1; then
+echo -n "  - Checking Python dependencies (FastAPI, DuckDB, FlashRank, FastEmbed, pdfplumber, pandas)... "
+if ! "$PY_EXEC" -c "import fastapi, uvicorn, requests, xlrd, openpyxl, pypdf, docx, pptx, multipart, duckdb, flashrank, fastembed, pdfplumber, pandas" >/dev/null 2>&1; then
   echo -e "${YELLOW}INSTALLING (this may take a few seconds)...${NC}"
   "$PIP_EXEC" install -r "${ROOT_DIR}/requirements.txt" || \
     "$PIP_EXEC" install --break-system-packages -r "${ROOT_DIR}/requirements.txt" || true
   
-  if "$PY_EXEC" -c "import fastapi, uvicorn, requests, xlrd, openpyxl, pypdf, docx, pptx, multipart, duckdb, flashrank, fastembed, pdfplumber" >/dev/null 2>&1; then
+  if "$PY_EXEC" -c "import fastapi, uvicorn, requests, xlrd, openpyxl, pypdf, docx, pptx, multipart, duckdb, flashrank, fastembed, pdfplumber, pandas" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ All Python dependencies installed successfully.${NC}"
   else
     echo -e "${RED}[ERROR] Failed to install required Python packages. Check your internet connection and python setup.${NC}"
@@ -458,7 +458,11 @@ echo -e "\n${BLUE}[8/9] Launching Universal File Reader & AI Validator Engine (p
 pkill -f "file_reader_engine.py" 2>/dev/null || true
 sleep 1
 
-nohup "$PY_EXEC" "${ROOT_DIR}/file_reader_engine.py" serve 8001 > "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$PY_EXEC" "${ROOT_DIR}/file_reader_engine.py" serve 8001 > "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
+else
+  nohup "$PY_EXEC" "${ROOT_DIR}/file_reader_engine.py" serve 8001 > "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
+fi
 disown 2>/dev/null || true
 echo -n "  - Waiting for Reader Engine on http://localhost:8001/health... "
 READER_COUNT=0

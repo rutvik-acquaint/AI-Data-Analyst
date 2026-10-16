@@ -94,7 +94,7 @@
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background-color: var(--bg-base);
+      background-color: #08060f;
       color: var(--text-primary);
       min-height: 100vh;
       height: 100vh;
@@ -103,22 +103,115 @@
       flex-direction: column;
     }
 
-    /* Ambient background gradient glow */
+    /* Ambient background gradient glow with dynamic luminous aurora orbs */
     .ambient-glow {
       position: fixed;
       inset: 0;
       pointer-events: none;
       z-index: 0;
-      background:
-        radial-gradient(circle at 50% 0%, rgba(103, 80, 164, 0.12) 0%, transparent 60%),
-        radial-gradient(circle at 100% 100%, rgba(85, 60, 154, 0.08) 0%, transparent 50%),
-        radial-gradient(circle at 0% 100%, rgba(60, 80, 150, 0.06) 0%, transparent 45%);
+      overflow: hidden;
+      background: radial-gradient(circle at 50% -10%, #1c1438 0%, #0c0919 55%, #05040a 100%);
+    }
+
+    /* Subtle geometric grid under glass for architectural depth */
+    .ambient-mesh-grid {
+      position: absolute;
+      inset: 0;
+      background-size: 50px 50px;
+      background-image: 
+        linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      mask-image: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0.85) 15%, transparent 85%);
+      -webkit-mask-image: radial-gradient(ellipse at 50% 50%, rgba(0, 0, 0, 0.85) 15%, transparent 85%);
+      opacity: 0.8;
+      pointer-events: none;
+    }
+
+    /* Authentic frosted glass dispersion noise */
+    .ambient-noise {
+      position: absolute;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.035'/%3E%3C/svg%3E");
+      opacity: 0.85;
+      pointer-events: none;
+    }
+
+    /* Ambient animated orbs that float softly behind glass surfaces */
+    .glow-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(85px);
+      pointer-events: none;
+      will-change: transform;
+    }
+
+    /* Vibrant Purple Aurora Orb (Top Center/Left) */
+    .glow-orb-1 {
+      top: -10%;
+      left: 15%;
+      width: 650px;
+      height: 650px;
+      background: radial-gradient(circle, rgba(147, 51, 234, 0.65) 0%, rgba(124, 58, 237, 0.38) 45%, rgba(99, 102, 241, 0.12) 70%, transparent 100%);
+      animation: floatOrb1 22s infinite ease-in-out alternate;
+    }
+
+    /* Radiant Electric Cyan / Blue Orb (Bottom Right) */
+    .glow-orb-2 {
+      bottom: -15%;
+      right: 8%;
+      width: 680px;
+      height: 680px;
+      background: radial-gradient(circle, rgba(6, 182, 212, 0.55) 0%, rgba(59, 130, 246, 0.38) 42%, rgba(139, 92, 246, 0.12) 70%, transparent 100%);
+      animation: floatOrb2 26s infinite ease-in-out alternate;
+    }
+
+    /* Hot Magenta / Rose Glow Orb (Top Right / Center) */
+    .glow-orb-3 {
+      top: 22%;
+      right: -10%;
+      width: 540px;
+      height: 540px;
+      background: radial-gradient(circle, rgba(236, 72, 153, 0.5) 0%, rgba(217, 70, 239, 0.32) 45%, rgba(168, 85, 247, 0.1) 70%, transparent 100%);
+      animation: floatOrb3 19s infinite ease-in-out alternate;
+    }
+
+    /* Violet / Deep Indigo Glow Orb (Mid Left / Behind Feature Cards) */
+    .glow-orb-4 {
+      top: 45%;
+      left: -12%;
+      width: 580px;
+      height: 580px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.58) 0%, rgba(139, 92, 246, 0.35) 45%, rgba(168, 85, 247, 0.1) 70%, transparent 100%);
+      animation: floatOrb4 24s infinite ease-in-out alternate;
+    }
+
+    @keyframes floatOrb1 {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(60px, 40px) scale(1.12); }
+      100% { transform: translate(-40px, 70px) scale(0.96); }
+    }
+
+    @keyframes floatOrb2 {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-70px, -50px) scale(1.14); }
+      100% { transform: translate(50px, -30px) scale(0.93); }
+    }
+
+    @keyframes floatOrb3 {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(-45px, 55px) scale(1.1); }
+      100% { transform: translate(65px, -25px) scale(0.95); }
+    }
+
+    @keyframes floatOrb4 {
+      0% { transform: translate(0, 0) scale(1); }
+      50% { transform: translate(50px, -60px) scale(1.1); }
+      100% { transform: translate(-35px, 40px) scale(0.95); }
     }
 
     /* Outer application frame container */
     .app-layout {
       position: relative;
-      z-index: 1;
       display: flex;
       width: 100vw;
       height: 100vh;
@@ -129,9 +222,10 @@
     .drawer-backdrop {
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.65);
-      backdrop-filter: blur(4px);
-      z-index: 35;
+      background: rgba(8, 6, 18, 0.65);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 40;
       opacity: 0;
       pointer-events: none;
       transition: opacity var(--transition-smooth);
@@ -142,6 +236,29 @@
       pointer-events: auto;
     }
 
+    /* Drawer close button used in mobile sidebars */
+    .drawer-close-btn {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      padding: 0;
+      flex-shrink: 0;
+    }
+
+    .drawer-close-btn:hover,
+    .drawer-close-btn:active {
+      background: rgba(255, 255, 255, 0.14);
+      color: var(--text-primary);
+    }
+
     /* =========================================================================
        LEFT SIDEBAR: Navigation, Chat History & Brand
        ========================================================================= */
@@ -149,8 +266,11 @@
       width: var(--sidebar-width);
       min-width: var(--sidebar-width);
       height: 100vh;
-      background: var(--bg-surface);
-      border-right: 1px solid var(--border-subtle);
+      background: rgba(14, 11, 24, 0.62);
+      backdrop-filter: blur(28px) saturate(180%);
+      -webkit-backdrop-filter: blur(28px) saturate(180%);
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04), 10px 0 30px rgba(0, 0, 0, 0.2);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -452,33 +572,52 @@
       flex-direction: column;
       position: relative;
       overflow: hidden;
-      background: var(--bg-base);
+      background: transparent;
     }
 
     /* Main Workspace Header */
     .workspace-header {
       height: var(--header-height);
       min-height: var(--header-height);
-      padding: 0 20px;
+      padding: 0 16px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid var(--border-subtle);
-      background: rgba(16, 14, 24, 0.85);
-      backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+      background: rgba(14, 11, 24, 0.58);
+      backdrop-filter: blur(24px) saturate(190%);
+      -webkit-backdrop-filter: blur(24px) saturate(190%);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25), inset 0 -1px 0 rgba(255, 255, 255, 0.05);
       z-index: 20;
     }
 
     .header-left {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
+      min-width: 0;
+      flex-shrink: 0;
     }
 
     .header-brand-logo {
       display: none;
       align-items: center;
       gap: 8px;
+      white-space: nowrap;
+    }
+
+    .header-brand-logo .brand-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.02em;
+      white-space: nowrap;
+    }
+
+    .header-titles {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
     }
 
     .header-titles h2 {
@@ -486,17 +625,22 @@
       font-weight: 700;
       color: var(--text-primary);
       letter-spacing: -0.01em;
+      white-space: nowrap;
+      margin: 0;
     }
 
     .header-titles p {
       font-size: 0.75rem;
       color: var(--text-secondary);
+      white-space: nowrap;
+      margin: 0;
     }
 
     .header-right {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
+      flex-shrink: 0;
     }
 
     /* Engine Status Pill */
@@ -506,11 +650,16 @@
       gap: 7px;
       padding: 5px 12px;
       border-radius: var(--radius-full);
-      background: var(--bg-surface-elevated);
-      border: 1px solid var(--border-interactive);
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       font-size: 0.76rem;
       font-weight: 500;
       color: var(--text-primary);
+      white-space: nowrap;
+      flex-shrink: 0;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.12);
     }
 
     .status-dot {
@@ -519,13 +668,14 @@
       border-radius: 50%;
       background: var(--accent-mint);
       box-shadow: 0 0 8px var(--accent-mint);
+      flex-shrink: 0;
     }
 
     .active-docs-container {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       max-width: 480px;
     }
 
@@ -535,14 +685,54 @@
       gap: 6px;
       padding: 3px 8px;
       border-radius: var(--radius-full);
-      background: var(--accent-lavender-subtle);
-      border: 1px solid var(--border-active);
+      background: rgba(201, 183, 255, 0.12);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(201, 183, 255, 0.35);
       font-size: 0.74rem;
       font-weight: 500;
       color: var(--accent-lavender);
       max-width: 220px;
-      box-shadow: 0 0 10px rgba(167, 139, 250, 0.12);
+      box-shadow: 0 0 12px rgba(167, 139, 250, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       transition: all var(--transition-fast);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    /* Dedicated Active Document Banner for Mobile/Tablet */
+    .active-doc-mobile-bar {
+      display: none;
+      background: rgba(18, 14, 28, 0.65);
+      backdrop-filter: blur(20px) saturate(170%);
+      -webkit-backdrop-filter: blur(20px) saturate(170%);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 6px 14px;
+      align-items: center;
+      z-index: 18;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+
+    .active-doc-mobile-content {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .active-doc-mobile-content::-webkit-scrollbar {
+      display: none;
+    }
+
+    .active-doc-mobile-label {
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--accent-lavender);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .active-doc-badge .active-doc-name {
@@ -625,14 +815,14 @@
        HERO / WELCOME SCREEN (Shown on fresh conversations)
        ========================================================================= */
     .hero-container {
-      margin: auto;
+      margin: 10px auto 0 auto;
       max-width: 660px;
       width: 100%;
       text-align: center;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 20px 0 40px;
+      padding: 10px 0 20px;
       transition: opacity var(--transition-smooth);
     }
 
@@ -641,17 +831,19 @@
     }
 
     .hero-icon-box {
-      width: 60px;
-      height: 60px;
-      border-radius: 18px;
-      background: var(--bg-surface-elevated);
-      border: 1px solid var(--border-interactive);
+      width: 54px;
+      height: 54px;
+      border-radius: 16px;
+      background: rgba(30, 24, 48, 0.55);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.16);
       display: flex;
       align-items: center;
       justify-content: center;
       color: var(--accent-lavender);
-      box-shadow: 0 8px 32px rgba(201, 183, 255, 0.15);
-      margin-bottom: 20px;
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35), 0 0 20px rgba(168, 85, 247, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      margin-bottom: 12px;
     }
 
     .hero-eyebrow {
@@ -660,24 +852,24 @@
       letter-spacing: 0.14em;
       color: var(--text-tertiary);
       text-transform: uppercase;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
     }
 
     .hero-title {
-      font-size: clamp(1.8rem, 4vw, 2.3rem);
+      font-size: clamp(1.65rem, 3.2vw, 2.1rem);
       font-weight: 700;
       color: #ffffff;
       letter-spacing: -0.03em;
       line-height: 1.15;
-      margin-bottom: 14px;
+      margin-bottom: 10px;
     }
 
     .hero-subtitle {
-      font-size: 0.92rem;
+      font-size: 0.88rem;
       color: var(--text-secondary);
-      line-height: 1.55;
+      line-height: 1.48;
       max-width: 500px;
-      margin-bottom: 32px;
+      margin-bottom: 20px;
     }
 
     /* 2 Feature Cards */
@@ -686,12 +878,14 @@
       grid-template-columns: 1fr 1fr;
       gap: 14px;
       width: 100%;
-      margin-bottom: 24px;
+      margin-bottom: 18px;
     }
 
     .feature-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+      background: rgba(22, 17, 34, 0.45);
+      backdrop-filter: blur(24px) saturate(190%);
+      -webkit-backdrop-filter: blur(24px) saturate(190%);
+      border: 1px solid rgba(255, 255, 255, 0.13);
       border-radius: var(--radius-lg);
       padding: 18px;
       text-align: left;
@@ -703,13 +897,14 @@
       min-height: 120px;
       position: relative;
       overflow: hidden;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
 
     .feature-card:hover {
-      border-color: var(--border-active);
-      background: var(--bg-surface-elevated);
+      border-color: rgba(201, 183, 255, 0.5);
+      background: rgba(32, 24, 52, 0.65);
       transform: translateY(-2px);
-      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+      box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42), 0 0 26px rgba(168, 85, 247, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.28);
     }
 
     .feature-card-top {
@@ -735,9 +930,10 @@
 
     /* Suggestion Chips */
     .suggestions-label {
-      font-size: 0.72rem;
-      color: var(--text-tertiary);
-      margin-bottom: 10px;
+      font-size: 0.74rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
     }
 
     .suggestion-chips-row {
@@ -749,9 +945,11 @@
     }
 
     .suggestion-chip {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
-      padding: 7px 14px;
+      background: rgba(30, 24, 48, 0.55);
+      backdrop-filter: blur(18px) saturate(170%);
+      -webkit-backdrop-filter: blur(18px) saturate(170%);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      padding: 8px 16px;
       border-radius: var(--radius-full);
       font-size: 0.8rem;
       font-weight: 500;
@@ -760,13 +958,15 @@
       display: inline-flex;
       align-items: center;
       gap: 8px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.18);
       transition: all var(--transition-fast);
     }
 
     .suggestion-chip:hover {
-      border-color: var(--border-active);
-      background: var(--bg-surface-elevated);
+      border-color: rgba(201, 183, 255, 0.5);
+      background: rgba(42, 34, 68, 0.75);
       transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35), 0 0 16px rgba(201, 183, 255, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.28);
     }
 
     /* =========================================================================
@@ -833,19 +1033,26 @@
       word-break: break-word;
     }
 
-    .message-row.user .message-bubble {
-      background: var(--bg-surface-elevated);
-      border: 1px solid var(--border-interactive);
-      color: var(--text-primary);
+    .message-row.user .message-bubble,
+    .user-message-row .message-bubble {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.85) 0%, rgba(99, 102, 241, 0.85) 100%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      color: #ffffff;
       border-bottom-right-radius: 4px;
+      box-shadow: 0 8px 24px rgba(109, 40, 217, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.3);
     }
 
-    .message-row.assistant .message-bubble {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+    .message-row.assistant .message-bubble,
+    .assistant-message-row .message-bubble {
+      background: rgba(20, 16, 32, 0.6);
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(255, 255, 255, 0.11);
       color: var(--text-primary);
       border-bottom-left-radius: 4px;
-      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.14);
     }
 
     /* Markdown styling inside assistant message */
@@ -1094,18 +1301,20 @@
       max-width: 800px;
       margin: 0 auto;
       pointer-events: auto;
-      background: var(--bg-input);
-      backdrop-filter: blur(20px);
-      border: 1px solid var(--border-interactive);
+      background: rgba(16, 12, 25, 0.65);
+      backdrop-filter: blur(32px) saturate(200%);
+      -webkit-backdrop-filter: blur(32px) saturate(200%);
+      border: 1px solid rgba(255, 255, 255, 0.16);
       border-radius: var(--radius-xl);
       padding: 12px 16px 10px;
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.05);
-      transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 35px rgba(139, 92, 246, 0.16), inset 0 1px 1px rgba(255, 255, 255, 0.24);
+      transition: border-color var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
     }
 
     .input-dock-card:focus-within {
-      border-color: var(--border-active);
-      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55), 0 0 24px var(--glow-subtle);
+      background: rgba(20, 15, 32, 0.75);
+      border-color: rgba(201, 183, 255, 0.55);
+      box-shadow: 0 28px 70px rgba(0, 0, 0, 0.65), 0 0 45px rgba(168, 85, 247, 0.28), inset 0 1px 1px rgba(255, 255, 255, 0.32);
     }
 
     /* Attached File Pill */
@@ -1277,8 +1486,11 @@
       width: var(--right-panel-width);
       min-width: var(--right-panel-width);
       height: 100vh;
-      background: var(--bg-surface);
-      border-left: 1px solid var(--border-subtle);
+      background: rgba(14, 11, 24, 0.62);
+      backdrop-filter: blur(28px) saturate(180%);
+      -webkit-backdrop-filter: blur(28px) saturate(180%);
+      border-left: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: inset 1px 0 0 rgba(255, 255, 255, 0.04), -10px 0 30px rgba(0, 0, 0, 0.2);
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -1346,8 +1558,10 @@
 
     /* Knowledge Source Card */
     .source-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-subtle);
+      background: rgba(22, 17, 34, 0.45);
+      backdrop-filter: blur(20px) saturate(170%);
+      -webkit-backdrop-filter: blur(20px) saturate(170%);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: var(--radius-md);
       padding: 12px;
       display: flex;
@@ -1356,16 +1570,19 @@
       cursor: pointer;
       transition: all var(--transition-fast);
       position: relative;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.12);
     }
 
     .source-card:hover {
-      border-color: var(--border-interactive);
-      background: var(--bg-surface-elevated);
+      border-color: rgba(201, 183, 255, 0.4);
+      background: rgba(32, 24, 50, 0.65);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
 
     .source-card.active {
       border-color: var(--border-active);
-      background: var(--bg-surface-elevated);
+      background: rgba(38, 28, 62, 0.75);
+      box-shadow: 0 0 20px rgba(201, 183, 255, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.22);
     }
 
     .source-card-main {
@@ -1514,9 +1731,16 @@
 
     /* Dual Engine Section */
     .dual-engine-box {
+      background: rgba(20, 15, 32, 0.48);
+      backdrop-filter: blur(20px) saturate(170%);
+      -webkit-backdrop-filter: blur(20px) saturate(170%);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: var(--radius-lg);
+      padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 10px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
     }
 
     .engine-row {
@@ -1786,13 +2010,29 @@
         right: 0;
         top: 0;
         bottom: 0;
+        width: min(340px, 88vw);
+        min-width: auto;
         transform: translateX(100%);
-        box-shadow: -10px 0 32px rgba(0, 0, 0, 0.65);
-        z-index: 45;
+        box-shadow: -16px 0 50px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+        z-index: 60;
+        background: rgba(16, 12, 25, 0.85);
+        backdrop-filter: blur(32px) saturate(190%);
+        -webkit-backdrop-filter: blur(32px) saturate(190%);
+        border-left: 1px solid rgba(255, 255, 255, 0.12);
+        visibility: hidden;
+        pointer-events: none;
+        transition: transform var(--transition-smooth), visibility 0s 0.25s;
       }
 
       .sidebar-right.open {
         transform: translateX(0);
+        visibility: visible;
+        pointer-events: auto;
+        transition: transform var(--transition-smooth), visibility 0s 0s;
+      }
+
+      #btnCloseRightSidebar {
+        display: flex;
       }
     }
 
@@ -1803,17 +2043,45 @@
         left: 0;
         top: 0;
         bottom: 0;
+        width: min(320px, 86vw);
+        min-width: auto;
         transform: translateX(-100%);
-        box-shadow: 10px 0 32px rgba(0, 0, 0, 0.65);
-        z-index: 45;
+        box-shadow: 16px 0 50px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+        z-index: 60;
+        background: rgba(16, 12, 25, 0.85);
+        backdrop-filter: blur(32px) saturate(190%);
+        -webkit-backdrop-filter: blur(32px) saturate(190%);
+        border-right: 1px solid rgba(255, 255, 255, 0.12);
+        visibility: hidden;
+        pointer-events: none;
+        transition: transform var(--transition-smooth), visibility 0s 0.25s;
       }
 
       .sidebar-left.open {
         transform: translateX(0);
+        visibility: visible;
+        pointer-events: auto;
+        transition: transform var(--transition-smooth), visibility 0s 0s;
+      }
+
+      #btnCloseLeftSidebar {
+        display: flex;
       }
 
       .header-brand-logo {
-        display: flex;
+        display: flex !important;
+      }
+
+      .header-titles {
+        display: none !important;
+      }
+
+      .desktop-only-active-docs {
+        display: none !important;
+      }
+
+      .active-doc-mobile-bar.has-active-doc {
+        display: flex !important;
       }
 
       .feature-cards-grid {
@@ -1830,42 +2098,49 @@
       }
 
       .sidebar-right {
-        width: min(320px, 86vw);
+        width: min(340px, 88vw);
         min-width: auto;
       }
 
       .workspace-header {
-        height: 56px;
-        padding: 0 12px;
+        height: 52px;
+        min-height: 52px;
+        padding: 0 10px;
+      }
+
+      .header-left {
+        gap: 8px;
+      }
+
+      .header-brand-logo .brand-icon-box {
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
       }
 
       .header-brand-logo .brand-title {
         font-size: 0.92rem;
-      }
-
-      .header-titles h2 {
-        font-size: 0.92rem;
-      }
-
-      .header-titles p {
-        display: none; /* Hide subtitle to keep header compact */
-      }
-
-      .active-doc-badge {
-        max-width: 110px;
-        font-size: 0.7rem;
-        padding: 3px 8px;
+        font-weight: 700;
+        white-space: nowrap;
       }
 
       .status-pill {
         padding: 4px 8px;
-        font-size: 0.72rem;
+        font-size: 0.7rem;
+        gap: 5px;
+        white-space: nowrap;
       }
 
       .sub-header-bar {
         padding: 6px 12px;
         font-size: 0.65rem;
       }
+
+    @media (max-width: 440px) {
+      .status-pill-prefix {
+        display: none !important;
+      }
+    }
 
       .chat-scroll-area {
         padding: 14px 12px 145px;
@@ -1985,8 +2260,14 @@
   </style>
 </head>
 <body>
-  <div class="ambient-glow"></div>
-  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <div class="ambient-glow">
+    <div class="glow-orb glow-orb-1"></div>
+    <div class="glow-orb glow-orb-2"></div>
+    <div class="glow-orb glow-orb-3"></div>
+    <div class="glow-orb glow-orb-4"></div>
+    <div class="ambient-mesh-grid"></div>
+    <div class="ambient-noise"></div>
+  </div>
 
   <!-- Global Drag and Drop Overlay -->
   <div class="drag-drop-overlay" id="dragOverlay">
@@ -2012,8 +2293,10 @@
               </div>
               <span class="brand-title">Local AI</span>
             </div>
-            <button type="button" class="icon-btn-ghost" id="btnCloseLeftSidebar" title="Close sidebar" style="display: none;">
-              ✕
+            <button type="button" class="drawer-close-btn" id="btnCloseLeftSidebar" title="Close menu" aria-label="Close menu">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+              </svg>
             </button>
           </div>
 
@@ -2072,21 +2355,23 @@
 
         <div class="user-profile-row">
           <div class="profile-info">
-            <div class="avatar-circle">RD</div>
+            <div class="avatar-circle">RA</div>
             <div>
-              <div class="profile-name">React Dev1</div>
-              <div class="profile-workspace">Personal workspace</div>
+              <div class="profile-name">Rutvik</div>
+              <div class="profile-workspace">Data Analyst · Local Workspace</div>
             </div>
           </div>
-          <button type="button" class="icon-btn-ghost" title="Settings">
+          <button type="button" class="icon-btn-ghost" id="btnClearCurrentChat" title="Clear current conversation">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
-              <circle cx="12" cy="12" r="3"/>
+              <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
             </svg>
           </button>
         </div>
       </div>
     </aside>
+
+    <!-- Dark backdrop overlay when mobile/tablet drawers are open -->
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
 
     <!-- =====================================================================
          CENTER WORKSPACE: Header, Chat Messages / Hero, Floating Input Dock
@@ -2107,21 +2392,21 @@
                 <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
               </svg>
             </div>
-            <span class="brand-title" style="font-size: 0.95rem;">Local AI</span>
+            <span class="brand-title">Local AI</span>
           </div>
 
-          <div class="header-titles">
+          <div class="header-titles" id="headerTitles">
             <h2>AI workspace</h2>
             <p>Data analyst &amp; knowledge assistant</p>
           </div>
         </div>
 
         <div class="header-right">
-          <div class="active-docs-container" id="activeDocsContainer" style="display: none;"></div>
+          <div class="active-docs-container desktop-only-active-docs" id="activeDocsContainer" style="display: none;"></div>
 
           <div class="status-pill" id="statusPill" title="Local Ollama, DuckDB and Qdrant online">
             <span class="status-dot"></span>
-            <span>Local engine</span>
+            <span class="status-pill-text"><span class="status-pill-prefix">Local </span>engine</span>
           </div>
 
           <button type="button" class="icon-btn-ghost" id="toggleRightSidebar" title="Toggle session context panel">
@@ -2131,6 +2416,14 @@
           </button>
         </div>
       </header>
+
+      <!-- Active Document Banner (Mobile / Tablet dedicated context bar) -->
+      <div class="active-doc-mobile-bar" id="activeDocMobileBar" style="display: none;">
+        <div class="active-doc-mobile-content">
+          <span class="active-doc-mobile-label">In context:</span>
+          <div class="active-docs-container" id="activeDocsContainerMobile"></div>
+        </div>
+      </div>
 
       <!-- Sub-header bar -->
       <div class="sub-header-bar">
@@ -2350,8 +2643,15 @@
     <aside class="sidebar-right" id="sidebarRight">
       <div class="right-panel-scroll">
         <div class="panel-header-row">
-          <span class="panel-header-title">Session context</span>
-          <span class="count-pill" id="knowledgeCountBadge">00</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="panel-header-title">Session context</span>
+            <span class="count-pill" id="knowledgeCountBadge">00</span>
+          </div>
+          <button type="button" class="drawer-close-btn" id="btnCloseRightSidebar" title="Close session context panel" aria-label="Close session context panel">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+            </svg>
+          </button>
         </div>
 
         <div>
@@ -2384,7 +2684,7 @@
             </div>
             <div>
               <div class="engine-name">DuckDB</div>
-              <div class="engine-desc">Precise data &amp; calculations</div>
+              <div class="engine-desc" id="engineDescDuckDB">Precise data &amp; calculations</div>
             </div>
           </div>
 
@@ -2397,7 +2697,7 @@
             </div>
             <div>
               <div class="engine-name">Qdrant</div>
-              <div class="engine-desc">Meaning &amp; document search</div>
+              <div class="engine-desc" id="engineDescQdrant">Meaning &amp; document search</div>
             </div>
           </div>
 
@@ -2431,7 +2731,9 @@
        ===================================================================== -->
   <script>
     // State
-    const API_BASE = window.location.port === '8080' ? 'http://localhost:8001' : '';
+    const API_BASE = (window.location.port === '8080' || window.location.port === '3000' || window.location.port === '5173')
+      ? `${window.location.protocol}//${window.location.hostname || 'localhost'}:8001`
+      : '';
     let sessionId = new URLSearchParams(window.location.search).get('session') || localStorage.getItem('local_ai_session_id') || ('session_' + Math.random().toString(36).substring(2, 9));
     localStorage.setItem('local_ai_session_id', sessionId);
 
@@ -2574,9 +2876,43 @@
         btnSubHeaderNewChat.addEventListener('click', startNewConversation);
       }
 
+      function closeAllDrawers() {
+        sidebarLeft.classList.remove('open');
+        sidebarRight.classList.remove('open');
+        drawerBackdrop.classList.remove('active');
+      }
+
+      const btnCloseLeftSidebar = document.getElementById('btnCloseLeftSidebar');
+      if (btnCloseLeftSidebar) {
+        btnCloseLeftSidebar.addEventListener('click', closeAllDrawers);
+      }
+
+      const btnCloseRightSidebar = document.getElementById('btnCloseRightSidebar');
+      if (btnCloseRightSidebar) {
+        btnCloseRightSidebar.addEventListener('click', closeAllDrawers);
+      }
+
+      const btnClearCurrentChat = document.getElementById('btnClearCurrentChat');
+      if (btnClearCurrentChat) {
+        btnClearCurrentChat.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (confirm('Clear current conversation history?')) {
+            try {
+              await fetch(`${API_BASE}/chat/sessions/${sessionId}/clear`, { method: 'POST' });
+            } catch (err) {
+              console.warn('Failed to clear session:', err);
+            }
+            messagesContainer.innerHTML = '';
+            heroContainer.classList.remove('hidden');
+            loadChatSessions();
+            closeAllDrawers();
+          }
+        });
+      }
+
       // Toggle Left Sidebar (Desktop collapse or Drawer overlay)
       toggleLeftSidebar.addEventListener('click', () => {
-        if (window.innerWidth >= 1200) {
+        if (window.innerWidth >= 992) {
           sidebarLeft.classList.toggle('collapsed');
         } else {
           const isOpen = sidebarLeft.classList.toggle('open');
@@ -2597,19 +2933,13 @@
       });
 
       // Clicking backdrop closes any active drawer
-      drawerBackdrop.addEventListener('click', () => {
-        sidebarLeft.classList.remove('open');
-        sidebarRight.classList.remove('open');
-        drawerBackdrop.classList.remove('active');
-      });
+      drawerBackdrop.addEventListener('click', closeAllDrawers);
 
       // Escape key closes any active drawer
       window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
           if (sidebarLeft.classList.contains('open') || sidebarRight.classList.contains('open')) {
-            sidebarLeft.classList.remove('open');
-            sidebarRight.classList.remove('open');
-            drawerBackdrop.classList.remove('active');
+            closeAllDrawers();
           }
         }
       });
@@ -2617,9 +2947,7 @@
       // Window resize listener: clean up mobile drawers on desktop
       window.addEventListener('resize', () => {
         if (window.innerWidth >= 1200) {
-          sidebarLeft.classList.remove('open');
-          sidebarRight.classList.remove('open');
-          drawerBackdrop.classList.remove('active');
+          closeAllDrawers();
         }
       });
 
@@ -2712,32 +3040,65 @@
     }
 
     function renderActiveDocsUI() {
-      activeDocsContainer.innerHTML = '';
+      const desktopContainer = document.getElementById('activeDocsContainer');
+      const mobileContainer = document.getElementById('activeDocsContainerMobile');
+      const mobileBar = document.getElementById('activeDocMobileBar');
+
+      if (desktopContainer) desktopContainer.innerHTML = '';
+      if (mobileContainer) mobileContainer.innerHTML = '';
       if (!Array.isArray(activeDocs)) activeDocs = [];
 
       if (activeDocs.length > 0) {
         localStorage.setItem('local_ai_active_docs', JSON.stringify(activeDocs));
         localStorage.setItem('local_ai_active_doc', activeDocs[0]);
-        activeDocsContainer.style.display = 'inline-flex';
+
+        if (desktopContainer) desktopContainer.style.display = 'inline-flex';
+        if (mobileBar) {
+          mobileBar.style.display = 'flex';
+          mobileBar.classList.add('has-active-doc');
+        }
 
         activeDocs.forEach(docName => {
-          const badge = document.createElement('div');
-          badge.className = 'active-doc-badge';
-          badge.title = `Current context: ${docName}. Click ✕ to remove from context.`;
-          badge.innerHTML = `
-            <span class="active-doc-name">📄 ${escapeHtml(docName)}</span>
-            <button type="button" class="btn-dismiss" title="Remove ${escapeHtml(docName)} from chat context" aria-label="Remove">✕</button>
-          `;
-          badge.querySelector('.btn-dismiss').addEventListener('click', (e) => {
-            e.stopPropagation();
-            removeActiveDocument(docName);
-          });
-          activeDocsContainer.appendChild(badge);
+          // Render badge for desktop header
+          if (desktopContainer) {
+            const badgeDesktop = document.createElement('div');
+            badgeDesktop.className = 'active-doc-badge';
+            badgeDesktop.title = `Current context: ${docName}. Click ✕ to remove from context.`;
+            badgeDesktop.innerHTML = `
+              <span class="active-doc-name">📄 ${escapeHtml(docName)}</span>
+              <button type="button" class="btn-dismiss" title="Remove ${escapeHtml(docName)} from chat context" aria-label="Remove">✕</button>
+            `;
+            badgeDesktop.querySelector('.btn-dismiss').addEventListener('click', (e) => {
+              e.stopPropagation();
+              removeActiveDocument(docName);
+            });
+            desktopContainer.appendChild(badgeDesktop);
+          }
+
+          // Render badge for mobile dedicated bar
+          if (mobileContainer) {
+            const badgeMobile = document.createElement('div');
+            badgeMobile.className = 'active-doc-badge';
+            badgeMobile.title = `Current context: ${docName}. Click ✕ to remove from context.`;
+            badgeMobile.innerHTML = `
+              <span class="active-doc-name">📄 ${escapeHtml(docName)}</span>
+              <button type="button" class="btn-dismiss" title="Remove ${escapeHtml(docName)} from chat context" aria-label="Remove">✕</button>
+            `;
+            badgeMobile.querySelector('.btn-dismiss').addEventListener('click', (e) => {
+              e.stopPropagation();
+              removeActiveDocument(docName);
+            });
+            mobileContainer.appendChild(badgeMobile);
+          }
         });
       } else {
         localStorage.removeItem('local_ai_active_docs');
         localStorage.removeItem('local_ai_active_doc');
-        activeDocsContainer.style.display = 'none';
+        if (desktopContainer) desktopContainer.style.display = 'none';
+        if (mobileBar) {
+          mobileBar.style.display = 'none';
+          mobileBar.classList.remove('has-active-doc');
+        }
       }
 
       // Synchronize active highlights & pill badges across knowledge source cards in the right sidebar
@@ -2873,6 +3234,34 @@
 
       knowledgeCountBadge.textContent = String(sources.length).padStart(2, '0');
 
+      // Calculate totals across all sources for valid, live Dual-Engine statistics
+      let totalTables = 0;
+      let totalRows = 0;
+      let totalChunks = 0;
+      sources.forEach(s => {
+        totalTables += (s.tables_count || (s.tables ? s.tables.length : 0) || 0);
+        totalRows += (s.total_rows || 0);
+        totalChunks += (s.chunks_count || 0);
+      });
+
+      const duckDescEl = document.getElementById('engineDescDuckDB');
+      if (duckDescEl) {
+        if (totalTables > 0) {
+          duckDescEl.textContent = `${totalTables} table${totalTables === 1 ? '' : 's'} · ${Number(totalRows).toLocaleString()} rows ready for SQL`;
+        } else {
+          duckDescEl.textContent = 'Precise data & calculations (0 tables loaded)';
+        }
+      }
+
+      const qdrantDescEl = document.getElementById('engineDescQdrant');
+      if (qdrantDescEl) {
+        if (totalChunks > 0) {
+          qdrantDescEl.textContent = `${totalChunks} vector chunk${totalChunks === 1 ? '' : 's'} indexed for semantic search`;
+        } else {
+          qdrantDescEl.textContent = 'Meaning & document search (0 vectors indexed)';
+        }
+      }
+
       if (sources.length === 0) {
         knowledgeSourcesList.innerHTML = `
           <div style="font-size:0.75rem; color:var(--text-tertiary); text-align:center; padding:12px 0;">
@@ -2884,14 +3273,23 @@
 
       sources.forEach(s => {
         const docName = s.source_file || s.name || s.table_name || 'Document';
-        const isTable = s.type === 'table' || (s.total_rows !== undefined);
-        const engineLabel = s.engine || (isTable ? 'DuckDB' : 'Qdrant');
+        const isHybrid = s.type === 'hybrid' || (s.chunks_count > 0 && s.tables_count > 0);
+        const isTable = !isHybrid && (s.type === 'table' || (s.total_rows !== undefined && !s.chunks_count));
+        const engineLabel = s.engine || (isHybrid ? 'Qdrant + DuckDB' : (isTable ? 'DuckDB' : 'Qdrant'));
 
         let metaText = '';
-        if (isTable) {
-          metaText = `${Number(s.total_rows || 0).toLocaleString()} rows · ${s.columns_count || (s.columns ? s.columns.length : 0)} columns`;
+        if (isHybrid) {
+          const chunkStr = `${s.chunks_count} vector chunk${s.chunks_count === 1 ? '' : 's'}`;
+          const tableStr = `${s.tables_count} table${s.tables_count === 1 ? '' : 's'}`;
+          const rowStr = s.total_rows ? ` (${Number(s.total_rows).toLocaleString()} rows)` : '';
+          const fileType = s.file_type ? `${s.file_type} · ` : '';
+          metaText = `${fileType}${chunkStr} · ${tableStr}${rowStr}`;
+        } else if (isTable) {
+          const fileType = s.file_type ? `${s.file_type} · ` : '';
+          const tableCountStr = s.tables_count && s.tables_count > 1 ? `${s.tables_count} tables · ` : '';
+          metaText = `${fileType}${tableCountStr}${Number(s.total_rows || 0).toLocaleString()} rows · ${s.columns_count || (s.columns ? s.columns.length : 0)} columns`;
         } else {
-          const chunks = s.chunks_count ? `${s.chunks_count} vector chunks` : 'Document vectors ready';
+          const chunks = s.chunks_count ? `${s.chunks_count} vector chunk${s.chunks_count === 1 ? '' : 's'}` : 'Document vectors ready';
           const fileType = s.file_type ? `${s.file_type} · ` : '';
           metaText = `${fileType}${chunks}`;
         }
@@ -2994,8 +3392,7 @@
         item.addEventListener('click', (e) => {
           if (e.target.classList.contains('session-delete-btn')) return;
           switchSession(s.id, s.active_document);
-          sidebarLeft.classList.remove('open');
-          drawerBackdrop.classList.remove('active');
+          closeAllDrawers();
         });
 
         item.querySelector('.session-delete-btn')?.addEventListener('click', async (e) => {
@@ -3074,8 +3471,7 @@
       document.getElementById('sessionStatusLabel').textContent = 'NEW CONVERSATION';
       document.querySelectorAll('.source-card').forEach(c => c.classList.remove('active'));
       loadChatSessions();
-      sidebarLeft.classList.remove('open');
-      drawerBackdrop.classList.remove('active');
+      closeAllDrawers();
       chatInput.focus();
     }
 

@@ -22,7 +22,7 @@ services:
     environment:
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=2
-      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_KEEP_ALIVE=30m
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_KV_CACHE_TYPE=q8_0
     restart: unless-stopped
@@ -47,7 +47,7 @@ services:
     image: nginx:alpine
     container_name: local-rag-web
     ports:
-      - "8080:80"
+      - "${WEB_PORT:-8080}:80"
     volumes:
       - ./chat.html:/usr/share/nginx/html/index.html:ro
     restart: unless-stopped

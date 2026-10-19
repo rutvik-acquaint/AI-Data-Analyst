@@ -2731,9 +2731,9 @@
        ===================================================================== -->
   <script>
     // State
-    const API_BASE = (window.location.port === '8080' || window.location.port === '3000' || window.location.port === '5173')
-      ? `${window.location.protocol}//${window.location.hostname || 'localhost'}:8001`
-      : '';
+    const API_BASE = (window.location.port === '8001')
+      ? ''
+      : `${window.location.protocol}//${window.location.hostname || 'localhost'}:8001`;
     let sessionId = new URLSearchParams(window.location.search).get('session') || localStorage.getItem('local_ai_session_id') || ('session_' + Math.random().toString(36).substring(2, 9));
     localStorage.setItem('local_ai_session_id', sessionId);
 
@@ -3547,12 +3547,16 @@
 
       const payload = {
         query: query,
-        session_id: sessionId,
-        target_documents: activeDocs,
-        target_document: activeDocs.length > 0 ? activeDocs[0] : '',
-        target_doc: activeDocs.length > 0 ? activeDocs[0] : '',
-        route: selectedRoute === 'AUTO' ? null : selectedRoute
+        session_id: sessionId
       };
+      if (selectedRoute && selectedRoute !== 'AUTO') {
+        payload.route = selectedRoute;
+      }
+      if (activeDocs && activeDocs.length > 0) {
+        payload.target_documents = activeDocs;
+        payload.target_document = activeDocs[0];
+        payload.target_doc = activeDocs[0];
+      }
 
       try {
         // Attempt Server-Sent Events (SSE) Token Streaming

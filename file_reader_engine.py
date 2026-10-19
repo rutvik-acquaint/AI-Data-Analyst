@@ -513,14 +513,15 @@ class UniversalFileReader:
                 stream = io.BytesIO(content_or_path) if isinstance(content_or_path, bytes) else content_or_path
                 with pdfplumber.open(stream) as pdf:
                     page_count = len(pdf.pages)
+                    want_tables = page_count <= 40
                     text_lines.append(f"# Document: {filename} (PDF - {page_count} pages)")
                     for idx, page in enumerate(pdf.pages):
                         p_num = idx + 1
                         page_text = page.extract_text() or ""
                         text_lines.append(f"\n--- Page {p_num} ---\n{page_text.strip()}")
                         
-                        # Extract any embedded tables (validated against false positives)
-                        page_tables = page.extract_tables() or []
+                        # Extract any embedded tables (validated against false positives, disabled on large PDFs)
+                        page_tables = (page.extract_tables() or []) if want_tables else []
                         for t_idx, tbl in enumerate(page_tables):
                             if tbl and len(tbl) >= 2:
                                 headers = [str(c or '').strip() for c in tbl[0]]
@@ -537,6 +538,7 @@ class UniversalFileReader:
                                     text_lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
                                     for r in rows:
                                         text_lines.append("| " + " | ".join(r) + " |")
+                        page.flush_cache()
 
                 if text_lines:
                     return {
@@ -858,7 +860,7 @@ class LocalRAGIndexer:
             pass
 
     def ingest_document(self, doc_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extracts, chunks, embeds in batches of 16, and stores slim points in batches of 64 in Qdrant."""
+        """Extracts, chunks, embeds in small batches (bounded memory), and stores in Qdrant."""
         text = doc_data['text']
         metadata = doc_data.get('metadata', {})
         filename = metadata.get('filename', 'unknown')
@@ -871,49 +873,49 @@ class LocalRAGIndexer:
         self.delete_existing_file_vectors(filename)
         has_sparse = self.collection_has_sparse_vectors()
 
-        texts = [c for c, _ in pieces]
-        dense = []
-        for i in range(0, len(texts), 16):
-            dense.extend(self.get_embeddings(texts[i:i + 16]))
-
-        points = []
-        for idx, ((chunk, page), dvec) in enumerate(zip(pieces, dense)):
-            if has_sparse:
-                vec = {'': dvec}
-                sp = self.get_sparse_embedding(chunk)
-                if sp and sp.get('indices'):
-                    vec['sparse'] = sp
-            else:
-                vec = dvec
-            points.append({
-                'id': str(uuid.uuid4()),
-                'vector': vec,
-                'payload': {
-                    'content': chunk,
-                    'source': filename,
-                    'metadata': {
-                        **slim,
+        BATCH, indexed = 8, 0
+        for start in range(0, len(pieces), BATCH):
+            batch = pieces[start:start + BATCH]
+            dense = self.get_embeddings([c for c, _ in batch])
+            points = []
+            for j, ((chunk, page), dvec) in enumerate(zip(batch, dense)):
+                if has_sparse:
+                    vec = {'': dvec}
+                    sp = self.get_sparse_embedding(chunk)
+                    if sp and sp.get('indices'):
+                        vec['sparse'] = sp
+                else:
+                    vec = dvec
+                points.append({
+                    'id': str(uuid.uuid4()),
+                    'vector': vec,
+                    'payload': {
+                        'content': chunk,
                         'source': filename,
-                        'page': page,
-                        'file_type': doc_data.get('file_type', 'txt'),
-                        'chunk_index': idx,
-                        'total_chunks': len(pieces)
+                        'metadata': {
+                            **slim,
+                            'source': filename,
+                            'page': page,
+                            'file_type': doc_data.get('file_type', 'txt'),
+                            'chunk_index': start + j,
+                            'total_chunks': len(pieces)
+                        }
                     }
-                }
-            })
-
-        for i in range(0, len(points), 64):
+                })
             res = requests.put(
                 f'{self.qdrant_url}/collections/{self.collection_name}/points?wait=true',
-                json={'points': points[i:i + 64]},
+                json={'points': points},
                 timeout=60
             )
             res.raise_for_status()
+            indexed += len(points)
+            if (start // BATCH) % 10 == 0:
+                logger.info(f'[ingest] {filename}: {indexed}/{len(pieces)} chunks')
 
         return {
             'status': 'success',
             'filename': filename,
-            'chunks_indexed': len(points),
+            'chunks_indexed': indexed,
             'total_chars': len(text),
             'is_hybrid': bool(has_sparse and self.sparse_model)
         }
@@ -1450,7 +1452,7 @@ class QueryRouter:
 
         return False
 
-    def classify(self, query: str, target_doc: Optional[Union[str, List[str]]] = None) -> str:
+    def classify(self, query: str, target_doc: Optional[Union[str, List[str]]] = None, has_library: bool = False) -> str:
         """Intelligently classifies user query into CONVERSATIONAL, pure SQL, semantic RAG, or HYBRID mode."""
         q_lower = query.lower()
 
@@ -1530,7 +1532,7 @@ class QueryRouter:
             r"\b(animal|animals|movie|movies|entertainment|film|cinema|actor|actress|music|song|sports)\b"
         ]
         if any(re.search(c, q_lower) for c in general_q_cues):
-            return "CONVERSATIONAL"
+            return "RAG" if has_library else "CONVERSATIONAL"
 
         return "RAG"
 
@@ -1895,7 +1897,8 @@ def usable_history(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for m in msgs:
         if m.get('role') == 'assistant':
             meta = m.get('metadata') or {}
-            if meta.get('route') == 'CONVERSATIONAL' or meta.get('weak_retrieval'):
+            if (not (m.get('content') or '').strip()
+                    or meta.get('route') == 'CONVERSATIONAL' or meta.get('weak_retrieval')):
                 if out and out[-1].get('role') == 'user':
                     out.pop()          # drop the question that got the bad answer
                 continue
@@ -2042,6 +2045,15 @@ class DocumentCatalogManager:
 # ==============================================================================
 # Phase 3: Conversational Query Rewriter
 # ==============================================================================
+_STOP = {'the', 'and', 'for', 'you', 'with', 'that', 'this', 'what', 'how', 'give', 'tell', 'about',
+         'can', 'please', 'its', 'his', 'her', 'they', 'them', 'their', 'him', 'she', 'from', 'are',
+         'was', 'were', 'has', 'have', 'had', 'more', 'also', 'now', 'next', 'then', 'again'}
+
+
+def _content_words(t):
+    return {w for w in re.findall(r'[a-z0-9]+', t.lower()) if len(w) > 2 and w not in _STOP}
+
+
 class ConversationalQueryRewriter:
     """Rewrites follow-up questions containing pronouns/ellipsis into standalone search queries."""
     def __init__(self, ollama_url: str = "http://localhost:11434"):
@@ -2054,6 +2066,9 @@ class ConversationalQueryRewriter:
 
         if not history or len(history) < 2:
             return query
+
+        if QueryRouter.DOC_REF_RE.search(q_lower) or is_summary_query(query):
+            return query          # self-contained document requests are never rewritten
 
         follow_up_cues = [
             r"\b(he|she|it|they|his|her|their|him|them)\b",
@@ -2110,6 +2125,10 @@ class ConversationalQueryRewriter:
                 if (orig_words & doc_words) and not (rewritten_words & doc_words):
                     logger.info(f"[rewriter] original contained doc term {(orig_words & doc_words)} dropped in rewrite '{first_line}'. Keeping original.")
                     return query
+                orig_w, new_w = _content_words(query), _content_words(first_line)
+                if orig_w and len(orig_w & new_w) / len(orig_w) < 0.6:
+                    logger.info(f'[rewriter] drift rejected: {first_line!r}')
+                    return query
                 return first_line
         except Exception as e:
             logger.warning(f"query rewrite failed, using raw query: {e}")
@@ -2142,7 +2161,8 @@ SUMMARY_PATTERNS = [
     r"\bwhat\s+(?:is\s+)?this\s+(?:pdf|doc|file|document)?\b",
     r"\bwhat\s+this\s+(?:pdf|file|doc)\s+about\b",
     r"\b(?:what\s+(?:is|are)\s+(?:this|it)\b)",
-    r"\b(?:explain\s+everything|explain\s+all|full\s+explanation)\b"
+    r"\b(?:explain\s+everything|explain\s+all|full\s+explanation)\b",
+    r"\b(?:imp(?:ortant)?|other|more|main)\s+(?:points?|topics?|concepts?|formulas?)\b"
 ]
 
 def is_summary_query(query: str, target_doc: Optional[str] = None) -> bool:
@@ -2171,6 +2191,11 @@ def _get_conversational_instant_answer(query: str) -> Optional[str]:
     clean_q = query.strip().lower().rstrip("?!. ")
     if re.match(r"^(?:hi|hello|hey|heya|howdy|sup|greetings|good\s+(?:morning|afternoon|evening|day))$", clean_q):
         return "Hello! I am your local AI Data Analyst and Knowledge Assistant. How can I help you today with your documents or data?"
+    if re.match(r'^(?:ok|okay|alright|cool|great|awesome|nice|got\s+it|understood|perfect|fine|sure)$', clean_q):
+        return "Great! Ask me anything about your document or data whenever you're ready."
+    if clean_q in ('help', 'help me'):
+        return ('I can summarize a document, answer questions with page citations, '
+                'or run exact calculations on spreadsheets. Pick a file and ask away.')
     if QueryRouter.IDENTITY_RE.search(clean_q):
         if re.search(r"\b(your\s+tech(?:nology)?\s+stack|what\s+tech|powers\s+you|built)\b", clean_q):
             return (
@@ -2290,7 +2315,7 @@ def _build_rag_prompt(
             if c_snippet:
                 history_lines.append(f"{r_label}: {c_snippet}")
         if history_lines:
-            dialogue_context = "\n\nRECENT CONVERSATION CONTEXT:\n" + "\n".join(history_lines)
+            dialogue_context = "\n\nBACKGROUND ONLY (do not use for facts; answer strictly from DOCUMENT CONTEXT):\n" + "\n".join(history_lines)
 
     if is_task_execution:
         system_prompt = (
@@ -2308,7 +2333,7 @@ def _build_rag_prompt(
         )
         pred_tokens = 1200
     elif is_summary:
-        is_keypoints = bool(re.search(r"\b(key\s*points?|keypoints|takeaways?|bullet\s*points?|main\s*points?|highlights?)\b", effective_query, re.IGNORECASE))
+        is_keypoints = bool(re.search(r"\b(key\s*points?|keypoints|takeaways?|bullet\s*points?|main\s*points?|highlights?|imp(?:ortant)?\s+points?|other\s+points?)\b", effective_query, re.IGNORECASE))
         if is_keypoints:
             system_prompt = (
                 "You are a helpful, warm, and articulate local AI assistant and document specialist.\n"
@@ -2397,32 +2422,69 @@ text_to_sql = TextToSQLEngine(duckdb_engine)
 chat_history = ChatHistoryDB()
 rewriter = ConversationalQueryRewriter()
 catalog_manager = DocumentCatalogManager(indexer, duckdb_engine)
+LAST_UPLOADED = {'name': None}
+_LIB = {'t': 0.0, 'docs': []}
 
 
-def stream_llm(system, prompt, num_predict, num_ctx=8192, max_rounds=3):
+def library_docs() -> List[str]:
+    if time.time() - _LIB['t'] > 30:
+        names = set(indexer.list_indexed_sources())
+        names |= {m.get('source_file') for m in duckdb_engine.registry.values() if m.get('source_file')}
+        _LIB['docs'], _LIB['t'] = sorted(names), time.time()
+    return _LIB['docs']
+
+
+def no_doc_message() -> str:
+    docs = library_docs()
+    if not docs:
+        return 'No document is uploaded yet. Please upload one first.'
+    return ('Which document do you mean? Select one in the file picker or name it in your question. '
+            'Available: ' + ', '.join(docs[:8]))
+
+
+def stream_llm(system, prompt, num_predict, num_ctx=6144, max_rounds=3, temperature=0.15):
     messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
+    produced = False
     for _ in range(max_rounds):
-        part, reason = '', None
-        with requests.post(f'{indexer.ollama_url}/api/chat',
-                json={'model': ANSWER_MODEL, 'messages': messages, 'stream': True,
-                      'keep_alive': KEEP_ALIVE,
-                      'options': {'temperature': 0.15, 'num_ctx': num_ctx,
-                                  'num_predict': num_predict, 'num_thread': 4}},
-                stream=True, timeout=120) as r:
-            for line in r.iter_lines():
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line)
-                except Exception:
-                    continue
-                tok = chunk.get('message', {}).get('content', '')
-                if tok:
-                    part += tok
-                    yield tok
-                if chunk.get('done'):
-                    reason = chunk.get('done_reason')
-                    break
+        part, reason, err = '', None, None
+        try:
+            with requests.post(f'{indexer.ollama_url}/api/chat',
+                    json={'model': ANSWER_MODEL, 'messages': messages, 'stream': True,
+                          'keep_alive': KEEP_ALIVE,
+                          'options': {'temperature': temperature, 'num_ctx': num_ctx,
+                                      'num_predict': num_predict, 'num_thread': 4}},
+                    stream=True, timeout=180) as r:
+                if r.status_code != 200:
+                    err = f'HTTP {r.status_code}: {r.text[:300]}'
+                else:
+                    for line in r.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except Exception:
+                            continue
+                        if chunk.get('error'):
+                            err = str(chunk['error'])
+                            break
+                        tok = chunk.get('message', {}).get('content', '')
+                        if tok:
+                            part += tok
+                            produced = True
+                            yield tok
+                        if chunk.get('done'):
+                            reason = chunk.get('done_reason')
+                            break
+        except Exception as e:
+            err = str(e)
+        if err:
+            logger.error(f'[llm] ollama error (num_ctx={num_ctx}): {err}')
+            if not produced and num_ctx > 4096:
+                num_ctx = 4096            # retry once with a smaller context window
+                continue
+            if not produced:
+                raise RuntimeError(err)
+            break
         logger.info(f'[llm] done_reason={reason} chars={len(part)}')
         if reason != 'length':
             break
@@ -2430,8 +2492,31 @@ def stream_llm(system, prompt, num_predict, num_ctx=8192, max_rounds=3):
                      {'role': 'user', 'content': 'Continue exactly where you stopped. Do not repeat anything.'}]
 
 
-def call_llm(system, prompt, num_predict, num_ctx=8192, max_rounds=3, temperature=0.15) -> str:
-    return "".join(stream_llm(system, prompt, num_predict, num_ctx=num_ctx, max_rounds=max_rounds))
+def call_llm(system, prompt, num_predict, num_ctx=6144, max_rounds=3, temperature=0.15) -> str:
+    return ''.join(stream_llm(system, prompt, num_predict, num_ctx=num_ctx,
+                              max_rounds=max_rounds, temperature=temperature))
+
+
+def extractive_fallback(passages):
+    if not passages:
+        return 'I found the document but could not generate an answer. Please try again.'
+    p = passages[0]
+    text = re.sub(r'^\[Source File:[^\]]*\]\s*', '', p['content']).strip()[:900]
+    page = f" (page {p['page']})" if p.get('page') else ''
+    return f'The language model did not return an answer, so here is the most relevant passage{page}:\n\n{text}'
+
+
+def safe_answer_stream(system, query, num_predict, passages):
+    got = False
+    try:
+        for tok in stream_llm(system, query, num_predict):
+            if tok.strip():
+                got = True
+            yield tok
+    except Exception as e:
+        logger.error(f'[llm] generation failed: {e}')
+    if not got:
+        yield extractive_fallback(passages)
 
 
 @app.get("/health")
@@ -2564,6 +2649,8 @@ def _do_delete_source(target_name: str):
     # 2. Remove table from DuckDB
     duckdb_engine.delete_file_tables(target)
 
+    _LIB['t'] = 0.0
+
     return {
         "status": "success",
         "deleted": target,
@@ -2615,59 +2702,60 @@ async def extract_file_endpoint(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
 
 
-@app.post("/ingest")
-async def ingest_file_endpoint(file: UploadFile = File(...), session_id: Optional[str] = Form(None)):
-    """
-    Dual Ingestion Pipeline:
-    1. Loads tabular files (.xls, .xlsx, .csv) into DuckDB with schema inference.
-    2. Chunks and indexes into Qdrant vector database for hybrid retrieval.
-    """
-    try:
-        content = await file.read()
-        doc = reader.read(content, filename=file.filename)
-        
-        # Ingest into DuckDB if structured tables present
-        tables_meta = doc.get("metadata", {}).get("tables", [])
+from fastapi.concurrency import run_in_threadpool
+
+INGEST_LOCK = threading.Semaphore(1)
+MAX_UPLOAD_MB = 50
+
+
+def _ingest_sync(content: bytes, filename: str, session_id: Optional[str]):
+    with INGEST_LOCK:
+        doc = reader.read(content, filename=filename)
+        tables_meta = doc.get('metadata', {}).get('tables', [])
         duck_results = []
-        if tables_meta:
-            duck_results = duckdb_engine.ingest_tables(file.filename, tables_meta)
+        if isinstance(tables_meta, list) and tables_meta:
+            duck_results = duckdb_engine.ingest_tables(filename, tables_meta)
         else:
-            duckdb_engine.delete_file_tables(file.filename)
-
+            duckdb_engine.delete_file_tables(filename)
         if duck_results and doc.get('file_type') in ('xls', 'xlsx', 'csv'):
-            doc['text'] = f'# Dataset: {file.filename}\n\n' + '\n\n'.join(
+            doc['text'] = f'# Dataset: {filename}\n\n' + '\n\n'.join(
                 text_to_sql.get_schema_context([m['table_name']]) for m in duck_results)
-
-        # Ingest into Qdrant Vector Store
         rag_result = indexer.ingest_document(doc)
-        
+        del doc
         if session_id:
             chat_history.get_or_create_session(session_id)
-            chat_history.set_session_active_doc(session_id, file.filename)
-        
-        table_summary = duck_results[0] if duck_results else None
-        suggested_q = table_summary["suggested_questions"] if table_summary else []
-
-        msg = f"File '{file.filename}' indexed successfully ({rag_result['chunks_indexed']} vector chunk(s))."
-        if table_summary:
-            msg += f" DuckDB table '{table_summary['table_name']}' created ({table_summary['total_rows']} rows)."
-
+            chat_history.set_session_active_doc(session_id, filename)
+        LAST_UPLOADED['name'] = filename
+        _LIB['t'] = 0.0
+        ts = duck_results[0] if duck_results else None
+        msg = f"File '{filename}' indexed successfully ({rag_result['chunks_indexed']} vector chunk(s))."
+        if ts:
+            msg += f" DuckDB table '{ts['table_name']}' created ({ts['total_rows']} rows)."
         return {
-            "status": "success",
-            "output": msg,
-            "text": msg,
-            "filename": file.filename,
-            "active_document": file.filename,
-            "is_tabular": bool(table_summary),
-            "table_schema": table_summary,
-            "suggested_questions": suggested_q,
-            "details": {
-                "rag": rag_result,
-                "duckdb": duck_results
-            }
+            'status': 'success',
+            'output': msg,
+            'text': msg,
+            'filename': filename,
+            'active_document': filename,
+            'is_tabular': bool(ts),
+            'table_schema': ts,
+            'suggested_questions': ts['suggested_questions'] if ts else [],
+            'details': {'rag': rag_result, 'duckdb': duck_results}
         }
+
+
+@app.post('/ingest')
+async def ingest_file_endpoint(file: UploadFile = File(...), session_id: Optional[str] = Form(None)):
+    try:
+        content = await file.read()
+        if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+            raise HTTPException(status_code=413, detail=f'File is larger than {MAX_UPLOAD_MB} MB.')
+        return await run_in_threadpool(_ingest_sync, content, file.filename, session_id)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to ingest file: {str(e)}")
+        logger.exception('ingest failed')
+        raise HTTPException(status_code=500, detail=f'Failed to ingest file: {str(e)}')
 
 
 class UnifiedQueryRequest(BaseModel):
@@ -2680,62 +2768,92 @@ class UnifiedQueryRequest(BaseModel):
     top_k: int = 4
 
 
+CLIENT_ROUTES = {'sql': 'SQL', 'data': 'SQL', 'analysis': 'SQL',
+                 'rag': 'RAG', 'document': 'RAG', 'documents': 'RAG',
+                 'general': 'CONVERSATIONAL', 'conversational': 'CONVERSATIONAL'}   # 'auto' is ignored
+
+
+def _parse_doc_selection(raw) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    s = str(raw).strip()
+    if s.startswith('[') and s.endswith(']'):
+        try:
+            return [str(x).strip() for x in json.loads(s) if str(x).strip()]
+        except Exception:
+            return [s]
+    if ',' in s:
+        return [x.strip() for x in s.split(',') if x.strip()]
+    return [s] if s else []
+
+
+def scoped_history(msgs, target_doc):
+    """Keeps only turns about the same document, so old topics cannot leak in."""
+    want = set(target_doc) if isinstance(target_doc, list) else ({target_doc} if target_doc else set())
+    out = []
+    for m in msgs:
+        td = (m.get('metadata') or {}).get('target_document')
+        have = set(td) if isinstance(td, list) else ({td} if td else set())
+        if want and have and not (want & have):
+            continue
+        out.append(m)
+    return out
+
+
 def _prepare_request(req: UnifiedQueryRequest):
     session_id = chat_history.get_or_create_session(req.session_id)
-    recent_msgs = usable_history(chat_history.get_messages(session_id, limit=10))
+    all_msgs = usable_history(chat_history.get_messages(session_id, limit=10))
 
-    # Parse incoming client documents (supports list, JSON array string, comma string, or single string)
     client_raw = req.target_documents if req.target_documents is not None else (
-        req.target_document if req.target_document is not None else req.target_doc
-    )
+        req.target_document if req.target_document is not None else req.target_doc)
+    selected = _parse_doc_selection(client_raw)          # an empty list means 'no selection'
+    client_route = CLIENT_ROUTES.get((req.route or '').strip().lower())
 
-    if client_raw is not None:
-        if isinstance(client_raw, (list, tuple, set)):
-            user_specified_docs = [str(x).strip() for x in client_raw if str(x).strip()]
-        elif isinstance(client_raw, str):
-            s = client_raw.strip()
-            if s.startswith("[") and s.endswith("]"):
-                try:
-                    user_specified_docs = [str(x).strip() for x in json.loads(s) if str(x).strip()]
-                except Exception:
-                    user_specified_docs = [s]
-            elif "," in s:
-                user_specified_docs = [x.strip() for x in s.split(",") if x.strip()]
-            elif s:
-                user_specified_docs = [s]
-            else:
-                user_specified_docs = []
-        else:
-            user_specified_docs = []
-        chat_history.set_session_active_doc(session_id, user_specified_docs)
+    if client_route == 'CONVERSATIONAL' and (QueryRouter.EXPLICIT_DOC_RE.search(req.query)
+                                             or is_summary_query(req.query)):
+        client_route = None      # the user clearly asked about a document
+
+    if client_route == 'CONVERSATIONAL' or (not client_route and router.is_conversational(req.query)):
+        target_doc, effective_query, route = None, req.query, 'CONVERSATIONAL'
+        recent_msgs, doc_src = [], 'none'
+        route_src = 'client' if client_route else 'rule'
     else:
-        user_specified_docs = chat_history.get_session_active_docs(session_id)
-
-    if router.is_conversational(req.query):
-        target_doc, effective_query, route = None, req.query, "CONVERSATIONAL"
-    else:
-        if len(user_specified_docs) > 1:
-            target_doc = user_specified_docs
-        elif len(user_specified_docs) == 1:
-            target_doc = user_specified_docs[0]
+        # Priority: UI selection > document named in the question > stored session / last upload
+        explicit = catalog_manager.resolve_target_document(req.query, session_active_doc=None)
+        if selected:
+            target_doc, doc_src = (selected if len(selected) > 1 else selected[0]), 'ui'
+        elif explicit:
+            target_doc, doc_src = explicit, 'query'
         else:
-            explicit = catalog_manager.resolve_target_document(req.query, session_active_doc=None)
-            target_doc = explicit if explicit else None
+            stored = chat_history.get_session_active_docs(session_id)
+            if not stored and LAST_UPLOADED['name']:
+                stored = [LAST_UPLOADED['name']]
+            target_doc = (stored if len(stored) > 1 else stored[0]) if stored else None
+            doc_src = 'session'
 
-        if target_doc:
+        docs_in_lib = library_docs()
+        if not target_doc and len(docs_in_lib) == 1:
+            target_doc, doc_src = docs_in_lib[0], 'only-doc'
+
+        if target_doc and doc_src != 'session':
             chat_history.set_session_active_doc(session_id, target_doc)
 
-        fallback_single = target_doc if isinstance(target_doc, str) else (target_doc[0] if target_doc else None)
-        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=fallback_single)
-        route_target = target_doc
-        route = req.route or router.classify(req.query, target_doc=route_target)
+        recent_msgs = scoped_history(all_msgs, target_doc)
+        single = target_doc if isinstance(target_doc, str) else (target_doc[0] if target_doc else None)
+        effective_query = rewriter.rewrite_if_needed(req.query, recent_msgs, target_doc=single)
+        route = client_route or router.classify(req.query, target_doc=target_doc,
+                                                has_library=bool(docs_in_lib))
+        route_src = 'client' if client_route else 'rule'
 
-    chat_history.add_message(session_id, "user", req.query, {
-        "rewritten_query": effective_query if effective_query != req.query else None,
-        "target_document": target_doc})
-    logger.info(f"[route] sid={session_id[:8]} q={req.query!r} eq={effective_query!r} "
-                f"doc={target_doc!r} route={route}")
+    chat_history.add_message(session_id, 'user', req.query, {
+        'rewritten_query': effective_query if effective_query != req.query else None,
+        'target_document': target_doc})
+    logger.info(f'[route] sid={session_id[:8]} q={req.query!r} eq={effective_query!r} doc={target_doc!r} '
+                f'doc_src={doc_src} route={route} route_src={route_src} client_route={req.route!r} hist={len(recent_msgs)}')
     return session_id, recent_msgs, target_doc, effective_query, route
+
 
 
 @app.post("/query")
@@ -2748,6 +2866,20 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
     - Routes conceptual questions to Qdrant Vector Search + LLM.
     """
     try:
+        if not re.search(r'\w', req.query or ''):
+            return {
+                'query': req.query,
+                'rewritten_query': None,
+                'target_document': None,
+                'route': 'CONVERSATIONAL',
+                'answer': 'Please type your question.',
+                'was_validated': False,
+                'corrections': [],
+                'sources': [],
+                'context_count': 0,
+                'session_id': req.session_id or 'default'
+            }
+
         session_id, recent_msgs, target_doc, effective_query, route = _prepare_request(req)
 
         # Route 0: Conversational & Everyday General Questions
@@ -2760,7 +2892,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                     "SECURITY CONSTRAINT: Never disclose backend source code, credentials, or personal private data (PII)."
                 )
                 try:
-                    ans_text = call_llm(conv_system, effective_query, num_predict=700, num_ctx=8192, temperature=0.4).strip()
+                    ans_text = call_llm(conv_system, effective_query, num_predict=700, num_ctx=6144, temperature=0.4).strip()
                     if not ans_text:
                         ans_text = "I'm here to help! What would you like to know or work on today?"
                 except Exception as e:
@@ -2809,7 +2941,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
 
         # Check if query references documents but none is uploaded/active in this session
         if not target_doc and QueryRouter.EXPLICIT_DOC_RE.search(req.query):
-            no_doc_msg = "No document is uploaded in this session. Please upload one first."
+            no_doc_msg = no_doc_message()
             res_data = {
                 "query": req.query,
                 "rewritten_query": None,
@@ -2864,7 +2996,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
 
         top_source = filtered_passages[0]["source"] if filtered_passages else "document"
         system_prompt, pred_tokens, is_summary, is_task_execution, combined_context = _build_rag_prompt(
-            effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=recent_msgs
+            effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=None if is_summary else recent_msgs
         )
 
         is_weak = is_weak_retrieval(filtered_passages, is_summary, is_task_execution)
@@ -2891,7 +3023,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
                         "Answer the following question clearly, accurately, and helpfully based on general knowledge.\n"
                         f"Question: {effective_query}"
                     )
-                    fallback_ans = call_llm("", gen_prompt, num_predict=700, num_ctx=8192, temperature=0.4).strip()
+                    fallback_ans = call_llm("", gen_prompt, num_predict=700, num_ctx=6144, temperature=0.4).strip()
                     if not fallback_ans:
                         fallback_ans = "I'm here to help, but I couldn't find this specific detail in your documents. Feel free to rephrase or ask any general question!"
                 except Exception:
@@ -2924,7 +3056,7 @@ def unified_query_endpoint(req: UnifiedQueryRequest):
             for p in filtered_passages[:5]
         ]
 
-        candidate_answer = ''.join(stream_llm(system_prompt, effective_query, pred_tokens))
+        candidate_answer = ''.join(safe_answer_stream(system_prompt, effective_query, pred_tokens, filtered_passages))
         # Run through safety validator
         val_res = validator.validate(effective_query, candidate_answer, combined_context)
         final_answer = val_res["validated_response"]
@@ -2959,6 +3091,22 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
     """
     def event_generator():
         try:
+            if not re.search(r'\w', req.query or ''):
+                meta_event = {
+                    "type": "meta",
+                    "route": "CONVERSATIONAL",
+                    "query": req.query,
+                    "rewritten_query": None,
+                    "target_document": None,
+                    "sources": [],
+                    "context_count": 0,
+                    "session_id": req.session_id or 'default'
+                }
+                yield f"data: {json.dumps(meta_event)}\n\n"
+                yield f"data: {json.dumps({'type': 'token', 'content': 'Please type your question.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
             session_id, recent_msgs, target_doc, effective_query, route = _prepare_request(req)
 
             # Route 0: Conversational & Everyday General Questions
@@ -2991,7 +3139,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                 )
                 full_parts = []
                 try:
-                    for tok in stream_llm(conv_system, effective_query, num_predict=700, num_ctx=8192, temperature=0.4):
+                    for tok in stream_llm(conv_system, effective_query, num_predict=700, num_ctx=6144, temperature=0.4):
                         full_parts.append(tok)
                         yield f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n"
                 except Exception as e:
@@ -3041,7 +3189,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
 
             # Check if query references documents but none is uploaded/active in this session
             if not target_doc and QueryRouter.EXPLICIT_DOC_RE.search(req.query):
-                no_doc_msg = "No document is uploaded in this session. Please upload one first."
+                no_doc_msg = no_doc_message()
                 meta_event = {
                     "type": "meta",
                     "route": "RAG",
@@ -3094,7 +3242,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
 
             top_source = filtered_passages[0]["source"] if filtered_passages else "document"
             system_prompt, pred_tokens, is_summary, is_task_execution, combined_context = _build_rag_prompt(
-                effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=recent_msgs
+                effective_query, target_doc, contexts, top_source, force_summary=is_summary, recent_history=None if is_summary else recent_msgs
             )
 
             is_weak = is_weak_retrieval(filtered_passages, is_summary, is_task_execution)
@@ -3121,7 +3269,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
                             "Answer the following question clearly, accurately, and helpfully based on general knowledge.\n"
                             f"Question: {effective_query}"
                         )
-                        fallback_msg = call_llm("", gen_prompt, num_predict=700, num_ctx=8192, temperature=0.4).strip()
+                        fallback_msg = call_llm("", gen_prompt, num_predict=700, num_ctx=6144, temperature=0.4).strip()
                         if not fallback_msg:
                             fallback_msg = "I'm here to help, but I couldn't find this specific detail in your documents. Feel free to rephrase or ask any general question!"
                     except Exception:
@@ -3166,7 +3314,7 @@ def query_stream_endpoint(req: UnifiedQueryRequest):
             yield f"data: {json.dumps(meta_event)}\n\n"
 
             full_parts = []
-            for tok in stream_llm(system_prompt, effective_query, pred_tokens):
+            for tok in safe_answer_stream(system_prompt, effective_query, pred_tokens, filtered_passages):
                 full_parts.append(tok)
                 yield f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n"
 

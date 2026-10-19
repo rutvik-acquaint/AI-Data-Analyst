@@ -198,6 +198,41 @@ else
   echo -e "${GREEN}READY${NC}"
 fi
 
+# Pre-cache local AI neural models (FastEmbed BM25 & FlashRank Reranker)
+echo -n "  - Pre-warming AI neural models (FastEmbed BM25 & FlashRank)... "
+"$PY_EXEC" -c "
+import sys
+try:
+    from fastembed import SparseTextEmbedding
+    SparseTextEmbedding(model_name='Qdrant/bm25')
+    from flashrank import Ranker
+    Ranker(model_name='ms-marco-MiniLM-L-12-v2')
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}READY (CACHED)${NC}"
+else
+  echo -e "${YELLOW}DOWNLOADING (first-time setup)...${NC}"
+  "$PY_EXEC" -c "
+try:
+    print('    - Downloading FastEmbed BM25 vocabulary...')
+    from fastembed import SparseTextEmbedding
+    SparseTextEmbedding(model_name='Qdrant/bm25')
+except Exception as e:
+    print(f'    ! BM25 download notice: {e}')
+
+try:
+    print('    - Downloading FlashRank ms-marco-MiniLM cross-encoder (~21MB)...')
+    from flashrank import Ranker
+    Ranker(model_name='ms-marco-MiniLM-L-12-v2')
+except Exception as e:
+    print(f'    ! FlashRank download notice: {e}')
+" || true
+  echo -e "  - Local AI neural models: ${GREEN}READY${NC}"
+fi
+
 # ------------------------------------------------------------------------------
 # 3. Resolve Port & Container Conflicts Across All Locations
 # ------------------------------------------------------------------------------
@@ -233,23 +268,90 @@ for c in local-rag-n8n local-rag-ollama local-rag-qdrant local-rag-web; do
   fi
 done
 
+# Helper function to check if a TCP port is in use
+is_port_busy() {
+  local p=$1
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -i :"$p" >/dev/null 2>&1 && return 0
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    fuser "$p/tcp" >/dev/null 2>&1 && return 0
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlpn 2>/dev/null | grep -Eq ":${p}[[:space:]]" && return 0
+  fi
+  return 1
+}
+
+# Forcefully kill any host process or Docker container holding a specific port
+free_port() {
+  local port=$1
+  local desc=$2
+
+  if is_port_busy "$port"; then
+    echo -e "${YELLOW}Port ${port} (${desc}) is in use. Killing conflicting processes & containers...${NC}"
+
+    # 1. Stop and remove Docker containers exposing this port
+    if command -v docker >/dev/null 2>&1; then
+      local c_ids
+      c_ids=$(docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | grep -E "(:${port}->)" | awk '{print $1}' || true)
+      if [ -n "$c_ids" ]; then
+        for cid in $c_ids; do
+          docker stop "$cid" >/dev/null 2>&1 || true
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+        done
+      fi
+    fi
+
+    # 2. Kill host processes on this port using fuser (-k -9)
+    if command -v fuser >/dev/null 2>&1; then
+      fuser -k -9 "$port/tcp" >/dev/null 2>&1 || true
+    fi
+
+    # 3. Kill host processes using lsof + kill -9
+    if command -v lsof >/dev/null 2>&1; then
+      local pids
+      pids=$(lsof -t -i:"$port" 2>/dev/null || true)
+      if [ -n "$pids" ]; then
+        echo "$pids" | xargs -r kill -9 >/dev/null 2>&1 || true
+      fi
+    fi
+
+    # 4. If still busy, elevate via admin helper to terminate root-owned processes
+    if is_port_busy "$port"; then
+      run_as_admin fuser -k -9 "$port/tcp" 2>/dev/null || true
+      if command -v lsof >/dev/null 2>&1; then
+        local root_pids
+        root_pids=$(sudo -n lsof -t -i:"$port" 2>/dev/null || true)
+        if [ -n "$root_pids" ]; then
+          run_as_admin kill -9 $root_pids 2>/dev/null || true
+        fi
+      fi
+    fi
+
+    sleep 0.5
+    if is_port_busy "$port"; then
+      echo -e "${YELLOW}[!] Port ${port} is still occupied by a persistent host service.${NC}"
+    else
+      echo -e "${GREEN}✓ Successfully freed port ${port} (${desc}).${NC}"
+    fi
+  fi
+}
+
+# Automatically terminate any stale processes/containers holding project ports
+free_port 8080 "Web Chat UI"
+free_port 8001 "Python Reader Engine"
+free_port 6333 "Qdrant Vector DB"
+free_port 5678 "n8n Orchestrator"
+
 # Stop host Ollama systemd service if running to prevent port 11434 conflict
 if systemctl is-active --quiet ollama 2>/dev/null; then
   echo -e "${YELLOW}Host ollama systemd service is active. Stopping host ollama to free port 11434...${NC}"
   run_as_admin systemctl stop ollama 2>/dev/null || true
 fi
 
-# Kill any stale python reader engine on port 8001
+# Kill any stale python reader engine by process name
 pkill -f "file_reader_engine.py" 2>/dev/null || true
-if command -v fuser >/dev/null 2>&1; then
-  fuser -k 8001/tcp >/dev/null 2>&1 || true
-fi
-if command -v lsof >/dev/null 2>&1; then
-  STALE_PID=$(lsof -t -i:8001 2>/dev/null || true)
-  if [ -n "$STALE_PID" ]; then
-    kill -9 $STALE_PID 2>/dev/null || true
-  fi
-fi
 
 # Ensure real, local directories exist (remove any broken symlinks)
 for d in n8n_data ollama_data qdrant_data; do
@@ -276,12 +378,26 @@ fi
 # n8n inside docker runs as UID 1000 (node). Ensure full rwx permissions to avoid SQLite/EACCES errors.
 chmod -R 777 "${ROOT_DIR}/n8n_data" 2>/dev/null || true
 
+# Check if port 8080 was successfully freed for Web UI; if not, auto-assign next available port
+WEB_PORT="${WEB_PORT:-8080}"
+if is_port_busy "$WEB_PORT"; then
+  echo -e "${YELLOW}[!] Port ${WEB_PORT} could not be freed (protected host service). Finding next available port...${NC}"
+  candidate_port=8081
+  while is_port_busy "$candidate_port"; do
+    candidate_port=$((candidate_port + 1))
+    if [ $candidate_port -gt 8100 ]; then break; fi
+  done
+  WEB_PORT=$candidate_port
+  echo -e "${GREEN}✓ Auto-assigned Web UI to available port ${WEB_PORT}.${NC}"
+fi
+export WEB_PORT
+
 echo -e "${GREEN}✓ Containers and ports verified and clean.${NC}"
 
 # ------------------------------------------------------------------------------
 # 4. Launch Docker Compose Stack
 # ------------------------------------------------------------------------------
-echo -e "\n${BLUE}[4/9] Launching Docker Compose stack (Qdrant, Ollama, n8n, Web UI)...${NC}"
+echo -e "\n${BLUE}[4/9] Launching Docker Compose stack (Qdrant, Ollama, n8n, Web UI on port ${WEB_PORT})...${NC}"
 $COMPOSE_CMD -f "${ROOT_DIR}/docker-compose.yml" up -d --remove-orphans
 echo -e "${GREEN}✓ Docker compose stack launched.${NC}"
 
@@ -459,23 +575,40 @@ pkill -f "file_reader_engine.py" 2>/dev/null || true
 sleep 1
 
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$PY_EXEC" "${ROOT_DIR}/file_reader_engine.py" serve 8001 > "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
+  setsid bash -c "while true; do \"$PY_EXEC\" \"${ROOT_DIR}/file_reader_engine.py\" serve 8001; echo 'engine exited, restarting in 3s'; sleep 3; done" >> "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
 else
-  nohup "$PY_EXEC" "${ROOT_DIR}/file_reader_engine.py" serve 8001 > "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
+  nohup bash -c "while true; do \"$PY_EXEC\" \"${ROOT_DIR}/file_reader_engine.py\" serve 8001; echo 'engine exited, restarting in 3s'; sleep 3; done" >> "${ROOT_DIR}/reader_engine.log" 2>&1 </dev/null &
 fi
 disown 2>/dev/null || true
 echo -n "  - Waiting for Reader Engine on http://localhost:8001/health... "
 READER_COUNT=0
+MAX_READER_WAIT=180
 until curl -s http://localhost:8001/health >/dev/null 2>&1; do
   READER_COUNT=$((READER_COUNT+1))
-  if [ $READER_COUNT -ge 20 ]; then
-    echo -e "${RED}FAILED${NC}"
-    cat "${ROOT_DIR}/reader_engine.log" | tail -n 20
+
+  # Fail immediately if process died unexpectedly
+  if ! pgrep -f "file_reader_engine.py" >/dev/null 2>&1; then
+    echo -e "\n${RED}FAILED (Reader Engine process exited unexpectedly)${NC}"
+    cat "${ROOT_DIR}/reader_engine.log" | tail -n 25
+    exit 1
+  fi
+
+  # Dynamic feedback if AI models are actively downloading or extracting
+  DL_STATUS=$(tail -n 6 "${ROOT_DIR}/reader_engine.log" 2>/dev/null | tr '\r' '\n' | grep -E "Downloading|Fetching|%|it/s|MB" | tail -n 1 | sed -e 's/^[ \t]*//' -e 's/[^a-zA-Z0-9 ._%|/:-]//g' | cut -c 1-55 || true)
+  if [ -n "$DL_STATUS" ]; then
+    printf "\r  - Downloading AI models & starting Reader Engine [%s] (%ds)... \033[K" "$DL_STATUS" "$READER_COUNT"
+  else
+    printf "\r  - Waiting for Reader Engine on http://localhost:8001/health... (%ds) \033[K" "$READER_COUNT"
+  fi
+
+  if [ $READER_COUNT -ge $MAX_READER_WAIT ]; then
+    echo -e "\n${RED}FAILED (Timed out after ${MAX_READER_WAIT}s waiting for models/engine)${NC}"
+    cat "${ROOT_DIR}/reader_engine.log" | tail -n 25
     exit 1
   fi
   sleep 1
 done
-echo -e "${GREEN}READY${NC}"
+echo -e "\r  - Waiting for Reader Engine on http://localhost:8001/health... ${GREEN}READY (${READER_COUNT}s)${NC}\033[K"
 
 # Test Validator Endpoint
 echo -n "  - Testing AI Response Validator endpoint (/validate)... "
@@ -521,19 +654,19 @@ CHECK_OLLAMA=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:11434/api
 CHECK_QDRANT=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6333/collections)
 CHECK_N8N=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5678/healthz)
 CHECK_ENGINE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health)
-CHECK_WEB=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+CHECK_WEB=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${WEB_PORT}/")
 
 echo -e "  [✓] Ollama Engine (port 11434)       : HTTP ${CHECK_OLLAMA}"
 echo -e "  [✓] Qdrant DB (port 6333)            : HTTP ${CHECK_QDRANT}"
 echo -e "  [✓] n8n Orchestrator (port 5678)     : HTTP ${CHECK_N8N}"
 echo -e "  [✓] File Reader & AI Validator (8001): HTTP ${CHECK_ENGINE}"
-echo -e "  [✓] Web Chat Application (port 8080) : HTTP ${CHECK_WEB}"
+echo -e "  [✓] Web Chat Application (port ${WEB_PORT}) : HTTP ${CHECK_WEB}"
 
 echo -e "\n${CYAN}${BOLD}=================================================================${NC}"
 echo -e "${GREEN}${BOLD}       🎉 Local RAG Agent is 100% LIVE, HEALTHY & READY!          ${NC}"
 echo -e "${CYAN}${BOLD}=================================================================${NC}"
 echo -e "${BOLD}Access Endpoints:${NC}"
-echo -e "  • AI Chat & File Upload UI : ${CYAN}${BOLD}http://localhost:8080${NC}"
+echo -e "  • AI Chat & File Upload UI : ${CYAN}${BOLD}http://localhost:${WEB_PORT}${NC}"
 echo -e "  • n8n Workflow Editor      : ${CYAN}http://localhost:5678${NC}"
 echo -e "  • Qdrant Web Dashboard     : ${CYAN}http://localhost:6333/dashboard${NC}"
 echo -e "  • Universal File Reader    : ${CYAN}http://localhost:8001${NC}"
@@ -547,8 +680,8 @@ echo -e "${CYAN}${BOLD}=========================================================
 # Automatically open web UI in default browser if in desktop graphical environment
 if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
   if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "http://localhost:8080" >/dev/null 2>&1 &
+    xdg-open "http://localhost:${WEB_PORT}" >/dev/null 2>&1 &
   elif command -v sensible-browser >/dev/null 2>&1; then
-    sensible-browser "http://localhost:8080" >/dev/null 2>&1 &
+    sensible-browser "http://localhost:${WEB_PORT}" >/dev/null 2>&1 &
   fi
 fi

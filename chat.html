@@ -1509,17 +1509,19 @@
 
     .right-panel-scroll {
       flex: 1;
-      overflow-y: auto;
-      padding: 18px 16px;
+      min-height: 0;
+      overflow: hidden;
+      padding: 16px 14px 10px 16px;
       display: flex;
       flex-direction: column;
-      gap: 20px;
+      gap: 12px;
     }
 
     .panel-header-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-shrink: 0;
     }
 
     .panel-header-title {
@@ -1538,6 +1540,14 @@
       border: 1px solid var(--border-subtle);
     }
 
+    .knowledge-sources-container {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+
     .section-label {
       font-size: 0.68rem;
       font-weight: 600;
@@ -1548,12 +1558,45 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-shrink: 0;
     }
 
     .sources-cards-list {
       display: flex;
       flex-direction: column;
       gap: 8px;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 5px;
+      margin-right: -3px;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+    }
+
+    .sources-cards-list::-webkit-scrollbar {
+      width: 5px;
+    }
+    .sources-cards-list::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 4px;
+    }
+    .sources-cards-list::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.18);
+      border-radius: 4px;
+      transition: background 0.2s ease;
+    }
+    .sources-cards-list::-webkit-scrollbar-thumb:hover {
+      background: rgba(201, 183, 255, 0.5);
+    }
+
+    .right-panel-fixed-bottom {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex-shrink: 0;
     }
 
     /* Knowledge Source Card */
@@ -1701,22 +1744,25 @@
     .add-knowledge-card {
       border: 1px dashed var(--border-interactive);
       border-radius: var(--radius-md);
-      padding: 14px;
+      padding: 10px 14px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 5px;
+      gap: 4px;
       cursor: pointer;
       transition: all var(--transition-fast);
-      background: transparent;
+      background: rgba(255, 255, 255, 0.02);
       color: var(--text-secondary);
+      flex-shrink: 0;
     }
 
     .add-knowledge-card:hover {
       border-color: var(--accent-lavender);
-      background: rgba(201, 183, 255, 0.03);
+      background: rgba(201, 183, 255, 0.06);
       color: var(--text-primary);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(201, 183, 255, 0.12);
     }
 
     .add-knowledge-title {
@@ -1736,11 +1782,12 @@
       -webkit-backdrop-filter: blur(20px) saturate(170%);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: var(--radius-lg);
-      padding: 14px;
+      padding: 12px 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
       box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      flex-shrink: 0;
     }
 
     .engine-row {
@@ -2355,9 +2402,9 @@
 
         <div class="user-profile-row">
           <div class="profile-info">
-            <div class="avatar-circle">RA</div>
+            <div class="avatar-circle">RR</div>
             <div>
-              <div class="profile-name">Rutvik</div>
+              <div class="profile-name">Rutvik Ram</div>
               <div class="profile-workspace">Data Analyst · Local Workspace</div>
             </div>
           </div>
@@ -2654,56 +2701,60 @@
           </button>
         </div>
 
-        <div>
+        <!-- Knowledge Sources (Scrollable documents container) -->
+        <div class="knowledge-sources-container">
           <div class="section-label">Knowledge sources</div>
           <div class="sources-cards-list" id="knowledgeSourcesList">
             <!-- Dynamically populated from /tables & indexed files -->
           </div>
+        </div>
 
-          <div class="add-knowledge-card" id="btnAddKnowledgeCard" style="margin-top: 10px;">
+        <!-- Pinned Actions & Live Engine Statistics (Always visible without scrolling) -->
+        <div class="right-panel-fixed-bottom">
+          <div class="add-knowledge-card" id="btnAddKnowledgeCard">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M5 12h14"/><path d="M12 5v14"/>
             </svg>
             <div class="add-knowledge-title">Add knowledge</div>
             <div class="add-knowledge-sub">CSV, XLSX, PDF, DOCX, TXT</div>
           </div>
-        </div>
 
-        <div class="dual-engine-box">
-          <div class="section-label">
-            <span>Dual engine</span>
-            <span class="count-pill" style="font-size: 0.65rem; color: var(--accent-lavender);">AUTO</span>
-          </div>
+          <div class="dual-engine-box">
+            <div class="section-label">
+              <span>Dual engine</span>
+              <span class="count-pill" style="font-size: 0.65rem; color: var(--accent-lavender);">AUTO</span>
+            </div>
 
-          <div class="engine-row">
-            <div class="engine-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <ellipse cx="12" cy="5" rx="9" ry="3"/>
-                <path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
-              </svg>
+            <div class="engine-row">
+              <div class="engine-icon">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                  <path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+                </svg>
+              </div>
+              <div>
+                <div class="engine-name">DuckDB</div>
+                <div class="engine-desc" id="engineDescDuckDB">Precise data &amp; calculations</div>
+              </div>
             </div>
-            <div>
-              <div class="engine-name">DuckDB</div>
-              <div class="engine-desc" id="engineDescDuckDB">Precise data &amp; calculations</div>
-            </div>
-          </div>
 
-          <div class="engine-row">
-            <div class="engine-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/>
-                <rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>
-              </svg>
+            <div class="engine-row">
+              <div class="engine-icon">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/>
+                  <rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>
+                </svg>
+              </div>
+              <div>
+                <div class="engine-name">Qdrant</div>
+                <div class="engine-desc" id="engineDescQdrant">Meaning &amp; document search</div>
+              </div>
             </div>
-            <div>
-              <div class="engine-name">Qdrant</div>
-              <div class="engine-desc" id="engineDescQdrant">Meaning &amp; document search</div>
-            </div>
-          </div>
 
-          <div class="routing-explanation-card">
-            <strong>The right engine. Every time.</strong>
-            Your question is automatically routed for more accurate answers.
+            <div class="routing-explanation-card">
+              <strong>The right engine. Every time.</strong>
+              Your question is automatically routed for more accurate answers.
+            </div>
           </div>
         </div>
       </div>
